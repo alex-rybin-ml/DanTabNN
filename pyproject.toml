@@ -5,5 +5,10 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "python-semantic-release>=10.5.3",
     "scikit-learn>=1.8.0",
 ]
+
+[tool.semantic_release]
+version_variable = "pyproject.toml:project.version"
+commit_parser = "angular"  # Uses feat/fix/perf/etc
