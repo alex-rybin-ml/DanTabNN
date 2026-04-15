@@ -9,6 +9,21 @@ dependencies = [
     "scikit-learn>=1.8.0",
 ]
 
+[project.optional-dependencies]
+dev = [
+    "python-semantic-release>=10.5.3",
+]
+
 [tool.semantic_release]
 version_variable = "pyproject.toml:project.version"
-commit_parser = "angular"  # Uses feat/fix/perf/etc
+commit_parser = "angular"
+branch = "main"
+upload_to_pypi = false
+upload_to_release = false  # Disable GitHub releases for now
+commit_version_number = true  # Actually commit the version change
+changelog_file = "CHANGELOG.md"
+
+[tool.semantic_release.commit_parser_options]
+major_tags = ["BREAKING CHANGE", "BREAKING-CHANGE", "feat!"]
+minor_tags = ["feat"]
+patch_tags = ["fix", "perf", "refactor", "docs"]

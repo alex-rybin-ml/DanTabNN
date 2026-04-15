@@ -135,11 +135,18 @@ dependencies = [
     { name = "scikit-learn" },
 ]
 
+[package.optional-dependencies]
+dev = [
+    { name = "python-semantic-release" },
+]
+
 [package.metadata]
 requires-dist = [
     { name = "python-semantic-release", specifier = ">=10.5.3" },
+    { name = "python-semantic-release", marker = "extra == 'dev'", specifier = ">=10.5.3" },
     { name = "scikit-learn", specifier = ">=1.8.0" },
 ]
+provides-extras = ["dev"]
 
 [[package]]
 name = "deprecated"
