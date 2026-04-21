@@ -14,7 +14,7 @@ class BinaryClassificationPipeline(BaseNNPipeline):
     def _build_model(self, input_dim: int, output_dim: int):
         """Build a Danet module with a single-output linear layer."""
 
-        from .models.danet import DANetModule
+        from models.danet import DANetModule
 
         model = DANetModule(
             input_dim=input_dim,
