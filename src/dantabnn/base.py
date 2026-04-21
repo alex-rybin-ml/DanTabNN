@@ -1,3 +1,5 @@
+"""Base abstract class for neural network pipelines."""
+
 from abc import ABC, abstractmethod
 from typing import List, Optional, Dict, Tuple, Union, Any
 from collections import OrderedDict
@@ -18,7 +20,7 @@ from utils.logger import setup_logger
 logger = setup_logger(__name__)
 
 
-class BaseNNPipline(ABC):
+class BaseNNPipeline(ABC):
     def __init__(
             self,
             numeric_features: List[str],
@@ -204,7 +206,7 @@ class BaseNNPipline(ABC):
             df_train: pd.DataFrame,
             df_val: Optional[pd.DataFrame] = None,
             verbose: int = 1,
-    ) -> "BaseNNPipline":
+    ) -> "BaseNNPipeline":
         """Fit the pipeline on training data.
 
         Parameters
@@ -377,7 +379,7 @@ class BaseNNPipline(ABC):
             cv: Union[int, BaseCrossValidator] = 5, 
             n_iter: Optional[int] = None,
             verbose: int = 1
-        ) -> "BaseNNPipline":
+        ) -> "BaseNNPipeline":
         """Perfor"m hyperparametrs tuning using grid or random search.
         
         Parameters
@@ -437,7 +439,7 @@ class BaseNNPipline(ABC):
         except Exception as e:
             logger.error(f"Failed to save Pipline to {path}, Error: {e}")
 
-    def load(self, path: Union[str, Path]) -> "BaseNNPipline":
+    def load(self, path: Union[str, Path]) -> "BaseNNPipeline":
         """Load previously saved pipeline.
         
         Parameters
