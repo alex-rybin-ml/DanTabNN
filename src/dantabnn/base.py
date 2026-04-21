@@ -1,7 +1,8 @@
 from abc import ABC, abstractmethod
-from typing import List, Optional, Dict, Tuple
+from typing import List, Optional, Dict, Tuple, Union, Any
 from collections import OrderedDict
 import warnings
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -10,6 +11,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
 from preprocessing.scaler import StandardScaler
 from preprocessing.encoder import CategoricalEncoder
+from sklearn.model_selection import BaseCrossValidator, GridSearchCV, RandomizedSearchCV
 
 from utils.logger import setup_logger
 
@@ -22,6 +24,11 @@ class BaseNNPipline(ABC):
             numeric_features: List[str],
             categorical_features: List[str],
             target_column: List[str],
+
+            # Model architecture 
+            hidden_dims: List[int] = [64, 32],
+            dropout: float = 0.2,
+            attention_heads: int = 4,
 
             # Training
             batch_size: int = 32,
@@ -46,6 +53,11 @@ class BaseNNPipline(ABC):
         self.categorical_features = categorical_features
         self.target_column = target_column
 
+        # Architecture
+        self.hidden_dims = hidden_dims
+        self.dropout = dropout
+        self.attention_heads = attention_heads
+
         # Training hyperparameters
         self.batch_size = batch_size
         self.epochs = epochs
@@ -67,7 +79,7 @@ class BaseNNPipline(ABC):
         self._set_seed()
 
         # Internal state 
-        self.model: Optional[nn.Model] = None 
+        self.model: Optional[nn.Module] = None 
         self.scaler: Optional[StandardScaler] = None 
         self.encoder: Optional[CategoricalEncoder] = None 
         self.is_fitted = False 
@@ -83,7 +95,7 @@ class BaseNNPipline(ABC):
             torch.cuda.manual_seed_all(self.random_state)
 
     @abstractmethod
-    def _build_model(self, input_dim: int, output_dim: int):
+    def _build_model(self, input_dim: int, output_dim: int) -> nn.Module:
         """Build and return the Pytorch model. 
         
         Parameters
@@ -358,17 +370,138 @@ class BaseNNPipline(ABC):
 
         return self.compute_metrics(y, y_pred, metric_funcs)
 
-    def hyperparameter_tuning(self):
-        pass
+    def hyperparameters_tuning(
+            self,
+            df_train: pd.DataFrame,
+            param_grid: Dict[str, List[Any]],
+            cv: Union[int, BaseCrossValidator] = 5, 
+            n_iter: Optional[int] = None,
+            verbose: int = 1
+        ) -> "BaseNNPipline":
+        """Perfor"m hyperparametrs tuning using grid or random search.
+        
+        Parameters
+        ----------
+        df_train : pd.DataFrame 
+            Training data.
+        param_grid : Dict[str, List[Any]]
+            Dictionary with parameter names and lists of values to try.
+        cv : int or BaseCrossValidator
+            Cross-validation strategy.
+        n_iter : int, optional
+            Number or parameter settings sampled for random search.
+            If None, grid search is used.
+        verbose : int 
+            Verbosity level.
 
-    def save(self):
-        pass
+        Returns
+        -------
+        self
+            The pipline fitted with the best hyperparameters.
+        """
+        from .tuning.hyperparameters import HyperparameterTunner
 
-    def load(self):
-        pass
+        tunner = HyperparameterTunner(self, param_grid, cv=cv, n_iter=n_iter)
+        tunner.fit(df_train, verbose=verbose)
 
-    def get_feature_importance(self):
-        pass
+        # Update pipeline with best parameters
+        best_params = tunner.best_params_
+        self.set_params(**best_params)
+
+        # Return on whole training data with best parameters
+        return self.fit(df_train, verbose=verbose)
+
+    def save(self, path: Union[str, Path]) -> None:
+        """Save the entire pipeline (model, scaler, encoder, hyperparameters) to disk.
+        
+        Parameters
+        ----------
+        path : str or Path
+            Directory where the pipeline will be saved.
+        """
+        import joblib
+        try:
+            path = Path(path)
+            path.mkdir(parents=True, exist_ok=True)
+            torch.save(self.models.state_dict(), path / "model.pt")
+
+            # Save processing objects
+            if self.scaler is not None:
+                joblib.dump(self.scaler, path / "scaler.joblib")
+            if self.encoder is not None:
+                joblib.dump(self.encoder, path / "encoder.joblib")
+
+            # Save hyperparameters
+            joblib.dump(self.hyperparameters, path / "hyperparameters.joblib")
+            logger.info(f"Pipeline saved to {path}")
+        except Exception as e:
+            logger.error(f"Failed to save Pipline to {path}, Error: {e}")
+
+    def load(self, path: Union[str, Path]) -> "BaseNNPipline":
+        """Load previously saved pipeline.
+        
+        Parameters
+        ----------
+        path : str or Path
+            Directory where pipeline was saved.
+
+        Returns 
+        -------
+        self
+        """
+        import joblib
+        path = Path(path)
+
+        # Load hyperparameters
+        hyperparameters = joblib.load(path / "hyperparameters.joblib")
+        self.set_params(**hyperparameters)
+
+        # Load Processing objects
+        scaler_path = path / "scaler.joblib"
+        encoder_path = path / "encoder.joblib"
+
+        if scaler_path.exists():
+            self.scaler = joblib.load(scaler_path)
+        if encoder_path.exists():
+            self.scaler = joblib.load(encoder_path)
+
+        # Rebuild Model
+        X_dummy = pd.DataFrame(
+            columns=self.numeric_features + self.categorical_features
+        )
+        X, self.feature_names = self._prepare_features(X_dummy, fit=False)
+        input_dim = X.shape[1] if X.shape[1] > 0 else 1
+        output_dim = self._get_output_dim(torch.zeros(0))
+
+        self.model = self._build_model(input_dim, output_dim).to(self.device)
+        self.model_load_state_dict(torch.load(path / "model.pt", map_location=self.device))
+        self.is_fitted = True
+
+        logger.info(f"Pipeline loaded from {path}")
+        return self
+
+    def get_feature_importance(self, method: str = "attention") -> pd.DataFrame:
+        """Compute feature importance scores.
+        
+        Parameters
+        ----------
+        method : str 
+            Method to compute importance ('attention', 'gradient', 'permutation').
+        
+        Returns
+        -------
+        pd.DataFrame
+            DataFrame with feature names and importance scores.
+        """
+        if not self.is_fitted:
+            raise RuntimeError("Pipline not fitted. Call fit first.")
+        
+        # Placeholder implementation - should be overridden by subclasses
+        # or implemented in a separated module.
+        importance = np.ones(len(self.feature_names)) if self.feature_names else np.array([])
+        return pd.DataFrame(
+            {"feature": self.feature_names, "importance": importance}
+        ).sort_values("importance", ascending=False)
 
     def get_model(self):
         """Return the enderlying PyTorch model."""
@@ -378,7 +511,7 @@ class BaseNNPipline(ABC):
 
     def get_preprocessor(self):
         """Return the fitted preprocessing objects."""
-        return {"scaller": self.scaler, "encoder": self.encoder}
+        return {"scaler": self.scaler, "encoder": self.encoder}
 
     def _get_output_dim(self):
         """Determine ouput dimension base on target tensor."""
@@ -395,9 +528,10 @@ class BaseNNPipline(ABC):
                 warnings.warn(f"Ignoring unknown parameter '{key}'.")
         return self
 
-    def get_params(self):
+    @property
+    def hyperparameters(self):
         """Get pipline parameters."""
-        exclude = {"model", "scaler", "encoder", "feature_names", "is_fitted", "history", "best_state"}
+        exclude = {"model", "scaler", "encoder", "is_fitted", "history", "best_state"}
         return {k: v for k, v in self.__dict__.items() if not k.startswith('_') and k not in exclude}
 
     def __repr__(self):
