@@ -11,8 +11,8 @@ import pandas as pd
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
-from preprocessing.scaler import StandardScaler
-from preprocessing.encoder import CategoricalEncoder
+from .preprocessing.scaler import StandardScaler
+from .preprocessing.encoder import CategoricalEncoder
 from sklearn.model_selection import BaseCrossValidator, GridSearchCV, RandomizedSearchCV
 
 from utils.logger import setup_logger

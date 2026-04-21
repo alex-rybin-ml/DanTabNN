@@ -1,6 +1,6 @@
 """Binary classification pipeline."""
 
-from base import BaseNNPipeline
+from .base import BaseNNPipeline
 import torch.nn as nn
 from sklearn.metrics import accuracy_score, roc_auc_score
 import pandas as pd

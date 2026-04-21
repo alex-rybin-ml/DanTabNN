@@ -3,7 +3,7 @@
 import torch
 import torch.nn as nn
 
-from base import BaseNNPipeline
+from .base import BaseNNPipeline
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 from typing import Dict
 import pandas as pd 
