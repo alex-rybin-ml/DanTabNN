@@ -1,21 +1,23 @@
 """Regression pipeline."""
 
+from typing import Dict
+
+import pandas as pd
 import torch
 import torch.nn as nn
+from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 
 from .base import BaseNNPipeline
-from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
-from typing import Dict
-import pandas as pd 
+
 
 class RegressionPipeline(BaseNNPipeline):
     """Pipeline for regression tasks."""
 
-    def _build_model(self, input_dim: int, output_dim: int ) -> nn.Module:
+    def _build_model(self, input_dim: int, output_dim: int) -> nn.Module:
         """Build a DANet module with a single-output linear layer."""
-        from models.danet import DANetsModule
+        from .models.danet import DANetModule
 
-        model = DANetsModule(
+        model = DANetModule(
             input_dim=input_dim,
             hidden_dims=self.hidden_dims,
             dropout=self.dropout,
@@ -44,5 +46,5 @@ class RegressionPipeline(BaseNNPipeline):
         target = super()._prepare_target(df)
 
         # Ensure target is float and shape (n_sample, 1)
-        target = target.viwe(-1, 1)
+        target = target.view(-1, 1)
         return target

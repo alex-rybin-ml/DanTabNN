@@ -1,21 +1,22 @@
 """Base abstract class for neural network pipelines."""
 
-from abc import ABC, abstractmethod
-from typing import List, Optional, Dict, Tuple, Union, Any
-from collections import OrderedDict
 import warnings
+from abc import ABC, abstractmethod
+from collections import OrderedDict
 from pathlib import Path
+from typing import List, Optional, Dict, Tuple, Union, Any
 
 import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
+from sklearn.model_selection import BaseCrossValidator
 from torch.utils.data import DataLoader, TensorDataset
-from .preprocessing.scaler import StandardScaler
-from .preprocessing.encoder import CategoricalEncoder
-from sklearn.model_selection import BaseCrossValidator, GridSearchCV, RandomizedSearchCV
 
-from utils.logger import setup_logger
+from .preprocessing.encoder import CategoricalEncoder
+from .preprocessing.scaler import StandardScaler
+from .utils.logger import setup_logger
+from .utils.metrics import compute_metrics
 
 logger = setup_logger(__name__)
 
@@ -25,7 +26,7 @@ class BaseNNPipeline(ABC):
             self,
             numeric_features: List[str],
             categorical_features: List[str],
-            target_column: List[str],
+            target_column: str,
 
             # Model architecture 
             hidden_dims: List[int] = [64, 32],
@@ -83,7 +84,8 @@ class BaseNNPipeline(ABC):
         # Internal state 
         self.model: Optional[nn.Module] = None 
         self.scaler: Optional[StandardScaler] = None 
-        self.encoder: Optional[CategoricalEncoder] = None 
+        self.encoder: Optional[CategoricalEncoder] = None
+        self.feature_names: Optional[List[str]] = None
         self.is_fitted = False 
         self.history: Dict[str, List[float]] = {}
         self.best_epoch = 0
@@ -145,7 +147,7 @@ class BaseNNPipeline(ABC):
             Names of the features after preprocessing.
         """
         numeric_data = df[self.numeric_features].values if self.numeric_features else np.empty((len(df), 0))
-        categorical_data = df[self.categorical_data].values if self.categorical_features else np.empty((len(df), 0))
+        categorical_data = df[self.categorical_features].values if self.categorical_features else np.empty((len(df), 0))
 
         # Scale numeric features
         if self.scale_numeric and numeric_data.size > 0:
@@ -155,6 +157,7 @@ class BaseNNPipeline(ABC):
             else:
                 if self.scaler is None:
                     raise RuntimeError("Scaler not fitted. Call fit first.")
+                numeric_scaled = self.scaler.transform(numeric_data)
         else:
             numeric_scaled = numeric_data
 
@@ -162,7 +165,7 @@ class BaseNNPipeline(ABC):
         if self.encode_categorical and categorical_data.size > 0:
             if fit:
                 self.encoder = CategoricalEncoder()
-                categorical_scaled = self.encoder.fit_transform(categorical_data)
+                categorical_encoded = self.encoder.fit_transform(categorical_data)
             else:
                 if self.encoder is None:
                     raise RuntimeError("Encoder not fitted. Call fit first.")
@@ -171,13 +174,15 @@ class BaseNNPipeline(ABC):
             categorical_encoded = categorical_data
 
         # Combine features
-        features = np.hstack([numeric_scaled, categorical_encoded]) if numeric_scaled.size > 0 or categorical_encoded.size > 0 else np.empty((len(df), 0))
+        features = np.hstack([numeric_scaled, categorical_encoded]) if (
+                numeric_scaled.size > 0 or categorical_encoded.size > 0) else np.empty((len(df), 0))
         features_names = (
             [f"num_{f}" for f in self.numeric_features] + 
-            [f"cat_{f}" for f in self.categorical_features for _ in range(self.encoder.n_values_per_feature if self.encoder else 1)]
+            [f"cat_{f}" for f in self.categorical_features for _ in range(
+                self.encoder.n_values_per_feature if self.encoder else 1)
+             ]
         )
         return torch.FloatTensor(features).to(self.device), features_names
-
 
     def _prepare_target(self, df: pd.DataFrame) -> torch.Tensor:
         """Ectract target column and convert to tensor."""
@@ -185,20 +190,20 @@ class BaseNNPipeline(ABC):
         # Subclasses may override this to reshape or encode target differently
         return torch.FloatTensor(target).to(self.device)
 
-    def _prepare_data(self, data, fit=False):
+    def _prepare_data(self, data, fit=False) -> Tuple[torch.Tensor, torch.Tensor, List[str]]:
         """Preprocess and convert to tensors features and target"""
-        X, feature_names = self.prepare_features(data, fit=True)
-        y = self.prepare_target(data)
-        return X, y, feature_names
+        features, feature_names = self._prepare_features(data, fit=fit)
+        target = self._prepare_target(data)
+        return features, target, feature_names
     
     def _create_dataloader(
-            self, X: torch.Tensor, y: Optional[torch.Tensor] = None, shuffle: bool = False
+            self, features: torch.Tensor, target: Optional[torch.Tensor] = None, shuffle: bool = False
     ) -> DataLoader:
         """Create a Pytorch DataLoader from tensors."""
-        if y is not None:
-            dataset = TensorDataset(X, y)
+        if target is not None:
+            dataset = TensorDataset(features, target)
         else:
-            dataset = TensorDataset(X)
+            dataset = TensorDataset(features)
         return DataLoader(dataset, batch_size=self.batch_size, shuffle=shuffle)
 
     def fit(
@@ -226,12 +231,12 @@ class BaseNNPipeline(ABC):
         self.feature_names = None
 
         # Prepare features and target for train, validation data 
-        X_train, y_train, self.feature_names = self._prepare_data(df_train, fit=True)
-        X_val, y_val, _ = self._prepare_data(df_train, fit=False) if df_val else None, None, None
+        train_features, train_target, self.feature_names = self._prepare_data(df_train, fit=True)
+        val_features, val_target, _ = self._prepare_data(df_train, fit=False) if df_val else (None, None, None)
 
         # Determine input/output dimensions
-        input_dim = X_train.shape[1]
-        output_dim = self.get_output_dim(y_train)
+        input_dim = train_features.shape[1]
+        output_dim = self._get_output_dim(train_target)
         logger.debug("Input dim: {input_dim}, ouput dim: {output_dim}")
 
         # Build model 
@@ -243,12 +248,13 @@ class BaseNNPipeline(ABC):
             weight_decay=self.weight_decay,
         )
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, mode="min", patience=self.early_stopping_patience // 2, verbose = verbose > 0
+            optimizer, mode="min", patience=self.early_stopping_patience // 2
         )
 
         # Training loop
-        train_loader = self._create_dataloader(X_train, y_train, shuffle=True)
-        val_loader = self._create_dataloader(X_val, y_val, shuffle=False) if X_val is not None else None 
+        train_loader = self._create_dataloader(train_features, train_target, shuffle=True)
+        val_loader = self._create_dataloader(val_features, val_target, shuffle=False) \
+            if val_features is not None else None
 
         self.history = {"train_loss": [], "val_loss": []}
         best_val_loss = float("inf")
@@ -259,7 +265,7 @@ class BaseNNPipeline(ABC):
             self.model.train()
             epoch_train_loss = 0.0
             for batch_X, batch_y in train_loader:
-                optimizer.sero_grad()
+                optimizer.zero_grad()
                 pred = self.model(batch_X)
                 loss = loss_fn(pred, batch_y)
                 loss.backward()
@@ -315,7 +321,7 @@ class BaseNNPipeline(ABC):
         logger.info("Fitting completed.")
         return self
 
-    def predict(self, df: pd.DateFrame) -> np.ndarray:
+    def predict(self, df: pd.DataFrame) -> np.ndarray:
         """Generate predictions for the input data.
         
         Parameters
@@ -332,8 +338,8 @@ class BaseNNPipeline(ABC):
         if not self.is_fitted:
             raise RuntimeError("Pipline not fitted. Call fit first.")
         self.model.eval()
-        X, _ = self._prepare_features(df, fit=False)
-        loader = self._create_dataloader(X, shuffle=True)
+        features, _ = self._prepare_features(df, fit=False)
+        loader = self._create_dataloader(features, shuffle=True)
         predictions = []
         with torch.no_grad():
             for batch_X, _ in loader:
@@ -360,17 +366,16 @@ class BaseNNPipeline(ABC):
             Dictionary of metric scores.
         """
         if not self.is_fitted:
-             raise RuntimeError("Pipline not fitted. Call fit first.")
-        X, _ = self._prepare_features(df, fit=False)
-        y = self._prepare_target(df).cpu().numpy()
+            raise RuntimeError("Pipline not fitted. Call fit first.")
+        y_true = self._prepare_target(df).cpu().numpy()
         y_pred = self.predict(df)
         metric_funcs = self._get_metrics()
 
         if metrics:
             # Allow custom metric selection
-            metric_funcs = {m : metric_funcs[m] for m in metrics if m in metric_funcs}
+            metric_funcs = {m: metric_funcs[m] for m in metrics if m in metric_funcs}
 
-        return self.compute_metrics(y, y_pred, metric_funcs)
+        return compute_metrics(y_true, y_pred, metric_funcs)
 
     def hyperparameters_tuning(
             self,
@@ -379,7 +384,7 @@ class BaseNNPipeline(ABC):
             cv: Union[int, BaseCrossValidator] = 5, 
             n_iter: Optional[int] = None,
             verbose: int = 1
-        ) -> "BaseNNPipeline":
+    ) -> "BaseNNPipeline":
         """Perfor"m hyperparametrs tuning using grid or random search.
         
         Parameters
@@ -425,7 +430,7 @@ class BaseNNPipeline(ABC):
         try:
             path = Path(path)
             path.mkdir(parents=True, exist_ok=True)
-            torch.save(self.models.state_dict(), path / "model.pt")
+            torch.save(self.model.state_dict(), path / "model.pt")
 
             # Save processing objects
             if self.scaler is not None:
@@ -468,15 +473,15 @@ class BaseNNPipeline(ABC):
             self.scaler = joblib.load(encoder_path)
 
         # Rebuild Model
-        X_dummy = pd.DataFrame(
+        dummy_features = pd.DataFrame(
             columns=self.numeric_features + self.categorical_features
         )
-        X, self.feature_names = self._prepare_features(X_dummy, fit=False)
-        input_dim = X.shape[1] if X.shape[1] > 0 else 1
+        features, self.feature_names = self._prepare_features(dummy_features, fit=False)
+        input_dim = features.shape[1] if features.shape[1] > 0 else 1
         output_dim = self._get_output_dim(torch.zeros(0))
 
         self.model = self._build_model(input_dim, output_dim).to(self.device)
-        self.model_load_state_dict(torch.load(path / "model.pt", map_location=self.device))
+        self.model.load_state_dict(torch.load(path / "model.pt", map_location=self.device))
         self.is_fitted = True
 
         logger.info(f"Pipeline loaded from {path}")
@@ -515,11 +520,11 @@ class BaseNNPipeline(ABC):
         """Return the fitted preprocessing objects."""
         return {"scaler": self.scaler, "encoder": self.encoder}
 
-    def _get_output_dim(self):
+    def _get_output_dim(self, y: torch.Tensor) -> int:
         """Determine ouput dimension base on target tensor."""
         # Default: regression/binary -> 1 (current usage only for this 2 types of tasks)
         # Override in multiclass classification
-        return 1 
+        return 1
 
     def set_params(self, **params):
         """Set pipeline parameters."""

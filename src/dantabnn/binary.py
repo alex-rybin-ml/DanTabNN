@@ -1,12 +1,15 @@
 """Binary classification pipeline."""
 
-from .base import BaseNNPipeline
+from typing import Dict
+
+import numpy as np
+import pandas as pd
+import torch
 import torch.nn as nn
 from sklearn.metrics import accuracy_score, roc_auc_score
-import pandas as pd
-from typing import Dict, Tuple
-import torch
-import numpy as np
+
+from .base import BaseNNPipeline
+
 
 class BinaryClassificationPipeline(BaseNNPipeline):
     """Pipeline for binary classification tasks."""
@@ -30,7 +33,7 @@ class BinaryClassificationPipeline(BaseNNPipeline):
     
     def _get_loss_fn(self) -> nn.Module:
         """Binary cross-entropy loss with logits"""
-        return nn.BCEWithLogitsLoss
+        return nn.BCEWithLogitsLoss()
     
     def _get_metrics(self) -> Dict[str, callable]:
         """Default metrics for binary classification."""
@@ -52,7 +55,7 @@ class BinaryClassificationPipeline(BaseNNPipeline):
         logits = super().predict(df)
         return torch.sigmoid(torch.FloatTensor(logits)).numpy()
     
-    def predict_classes(self, df, threshold: float = 0.5) -> Tuple[int]:
+    def predict_classes(self, df, threshold: float = 0.5) -> np.ndarray:
         """Return binary class predictions."""
         probs = self.predict(df)
         return (probs > threshold).astype(int)

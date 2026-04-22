@@ -1,18 +1,18 @@
 """Multiclass classification pipeline."""
 
+from typing import List, Dict
+
+import numpy as np
+import pandas as pd
 import torch
 import torch.nn as nn
-import numpy as np
-from typing import List, Dict
-import pandas as pd
-
 from sklearn.metrics import accuracy_score, f1_score
+
 from .base import BaseNNPipeline
 
 
 class MulticlassClassificationPipeline(BaseNNPipeline):
     """Pipline for multiclass classification tasks."""
-
 
     def __init__(
             self,
@@ -38,7 +38,7 @@ class MulticlassClassificationPipeline(BaseNNPipeline):
 
     def _build_model(self, input_dim: int, output_dim: int) -> nn.Module:
         """Build a Danet module with a multi-output linear layer."""
-        from .models.danet import  DANetModule
+        from .models.danet import DANetModule
 
         model = DANetModule(
             input_dim=input_dim,
@@ -79,7 +79,7 @@ class MulticlassClassificationPipeline(BaseNNPipeline):
     
     def predict(self, df: pd.DataFrame) -> np.ndarray:
         """Return predicted class probabilities."""
-        logits = super().predict(df) # shape (n_samples, n_classes)
+        logits = super().predict(df)  # shape (n_samples, n_classes)
         return torch.softmax(torch.FloatTensor(logits), dim=1).numpy()
         
     def predict_classes(self, df: pd.DataFrame) -> np.ndarray:
