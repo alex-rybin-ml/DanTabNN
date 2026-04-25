@@ -15,7 +15,7 @@ class FeatureAttention(nn.Module):
         assert self.head_dim * num_heads == input_dim, "input_dim must be divisible by num_heads"
 
         self.qkv = nn.Linear(input_dim, 3 * input_dim)
-        self.proj = nn.Linar(input_dim, input_dim)
+        self.proj = nn.Linear(input_dim, input_dim)
         self.dropout = nn.Dropout(dropout)
         self.layer_norm = nn.LayerNorm(input_dim)
 
@@ -23,17 +23,17 @@ class FeatureAttention(nn.Module):
         """x shape: (batch_size, seq_len, input_dim) where seq_len = 1 for tabular."""
         B, L, D = x.shape
         qkv = self.qkv(x).reshape(B, L, 3, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4)
-        q, k, v = qkv[0], qkv[1], qkv[2] # each shape (B, num_heads, L, head_dim)
+        q, k, v = qkv[0], qkv[1], qkv[2]  # each shape (B, num_heads, L, head_dim)
 
         attn = (q @ k.transpose(-2, -1)) * (self.num_heads ** -0.5)
         attn = F.softmax(attn, dim=1)
         attn = self.dropout(attn)
 
-        out = attn @ v # (B, num_heads, L, head_dim)
+        out = attn @ v  # (B, num_heads, L, head_dim)
         out = out.transpose(1, 2).reshape(B, L, D)
         out = self.proj(out)
         out = self.dropout(out)
-        out = self.layer_norm(out + x) # resudual connection
+        out = self.layer_norm(out + x)  # resudual connection
         return out
 
 
@@ -47,7 +47,7 @@ class SampleAttention(nn.Module):
         assert self.head_dim * num_heads == input_dim, "input_dim must be divisible by num_heads"
 
         self.qkv = nn.Linear(input_dim, 3 * input_dim)
-        self.proj = nn.Linar(input_dim, input_dim)
+        self.proj = nn.Linear(input_dim, input_dim)
         self.dropout = nn.Dropout(dropout)
         self.layer_norm = nn.LayerNorm(input_dim)
 
@@ -136,7 +136,7 @@ class DANetModule(nn.Module):
             Output tensor of shape (batch_size, output_dim).
         """
         # Add sequence dimension for attention modules
-        x = x.unsqueeze(1) # (B, 1, 0)
+        x = x.unsqueeze(1)  # (B, 1, 0)
 
         # Embedding
         x = self.embed(x)
