@@ -380,43 +380,109 @@ class BaseNNPipeline(ABC):
     def hyperparameters_tuning(
             self,
             df_train: pd.DataFrame,
-            param_grid: Dict[str, List[Any]],
-            cv: Union[int, BaseCrossValidator] = 5, 
-            n_iter: Optional[int] = None,
-            verbose: int = 1
+            param_grid: Optional[Dict[str, List[Any]]] = None,
+            df_val: Optional[pd.DataFrame] = None,
+            cv: Union[int, BaseCrossValidator] = 5,
+            n_iter: Optional[int] = 50,
+            scoring: str = "neg_mean_squared_error",
+            direction: str = "minimize",
+            random_state: Optional[int] = None,
+            n_jobs: int = 1,
+            verbose: int = 1,
+            show_progress_bar: bool = False,
+            small_search: bool = False,
+            **tuner_kwargs,
     ) -> "BaseNNPipeline":
-        """Perfor"m hyperparametrs tuning using grid or random search.
-        
+        """Perform hyperparameter tuning using Optuna Bayesian optimization.
+
+        If ``param_grid`` is not provided, automatically generates one
+        suitable for DANetModule based on the pipeline's architecture.
+
         Parameters
         ----------
-        df_train : pd.DataFrame 
+        df_train : pd.DataFrame
             Training data.
-        param_grid : Dict[str, List[Any]]
-            Dictionary with parameter names and lists of values to try.
-        cv : int or BaseCrossValidator
-            Cross-validation strategy.
+        param_grid : Dict[str, List[Any]], optional
+            Dictionary with parameter names and lists of values to try,
+            or Optuna distribution objects. If None, auto-generated for DANet.
+        df_val : pd.DataFrame, optional
+            Validation data for hold-out evaluation. If provided, ``cv``
+            is ignored.
+        cv : int or BaseCrossValidator, default=5
+            Cross-validation strategy when ``df_val`` is None.
         n_iter : int, optional
-            Number or parameter settings sampled for random search.
-            If None, grid search is used.
-        verbose : int 
+            Number of Optuna trials. Default is 50.
+        scoring : str, default="neg_mean_squared_error"
+            Scoring metric (sklearn scorer string).
+        direction : {"minimize", "maximize"}, default="minimize"
+            Whether the metric should be minimized or maximized.
+        random_state : int, optional
+            Seed for reproducibility. Defaults to ``self.random_state``.
+        n_jobs : int, default=1
+            Number of parallel trials. Use -1 for all cores.
+        verbose : int, default=1
             Verbosity level.
+        show_progress_bar : bool, default=False
+            Show tqdm progress bar during optimization.
+        small_search : bool, default=False
+            If True and auto-generating param_grid, use a minimal grid
+            for quick prototyping (~10 trials).
+        **tuner_kwargs
+            Additional arguments passed to HyperparameterTuner
+            (e.g., ``pruner``, ``study_name``).
 
         Returns
         -------
-        self
-            The pipline fitted with the best hyperparameters.
+        BaseNNPipeline
+            A *new* pipeline instance fitted with the best hyperparameters.
+            The original instance remains unmodified.
         """
-        from .tuning.hyperparameters import HyperparameterTunner
+        from .tuning.hyperparam_tune import HyperparameterTuner
+        from .tuning.tune_utils import get_danet_param_grid
 
-        tunner = HyperparameterTunner(self, param_grid, cv=cv, n_iter=n_iter)
-        tunner.fit(df_train, verbose=verbose)
+        # Auto-generate param_grid if not provided
+        if param_grid is None:
+            # Infer input_dim from training data after preprocessing
+            train_features, _, _ = self._prepare_data(df_train, fit=True)
+            input_dim = train_features.shape[1]
 
-        # Update pipeline with best parameters
-        best_params = tunner.best_params_
-        self.set_params(**best_params)
+            param_grid = get_danet_param_grid(
+                input_dim=input_dim,
+                small_search=small_search,
+            )
 
-        # Return on whole training data with best parameters
-        return self.fit(df_train, verbose=verbose)
+            if verbose >= 1:
+                logger.info(
+                    f"Auto-generated param_grid for DANet "
+                    f"(input_dim={input_dim}, small_search={small_search})"
+                )
+
+        # Use instance random_state if none provided
+        if random_state is None:
+            random_state = self.random_state
+
+        tuner = HyperparameterTuner(
+            pipeline=self,
+            param_grid=param_grid,
+            cv=cv,
+            n_iter=n_iter if n_iter is not None else 50,
+            scoring=scoring,
+            n_jobs=n_jobs,
+            verbose=verbose,
+            random_state=random_state,
+            direction=direction,
+            **tuner_kwargs,
+        )
+
+        tuner.fit(
+            df_train=df_train,
+            df_val=df_val,
+            verbose=verbose,
+            n_jobs=n_jobs,
+            show_progress_bar=show_progress_bar,
+        )
+
+        return tuner.best_estimator_
 
     def save(self, path: Union[str, Path]) -> None:
         """Save the entire pipeline (model, scaler, encoder, hyperparameters) to disk.
