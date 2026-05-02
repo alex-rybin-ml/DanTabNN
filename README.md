@@ -13,4 +13,4 @@ A PyTorch-based deep learning pipeline for tabular data classification and regre
 ## Installation
 
 ```bash
-pip install danet-pipeline
+pip install dantabnn
