@@ -48,4 +48,7 @@ class CategoricalEncoder:
     
     def fit_transform(self, X: np.ndarray) -> np.ndarray:
         """Fit and transform in one step."""
-        return self.encoder.fit_transform(X)
+        result = self.encoder.fit_transform(X)
+        self.categories_ = self.encoder.categories_
+        self.n_values_per_feature = [len(cats) for cats in self.categories_]
+        return result

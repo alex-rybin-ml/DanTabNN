@@ -46,4 +46,5 @@ class StandardScaler:
     
     def fit_transform(self, X: np.ndarray) -> np.ndarray:
         """Fit and transform in one step."""
-        return self.scaler.fit_transform(X)
+        self.fit(X)
+        return self.transform(X)
