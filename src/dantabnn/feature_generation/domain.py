@@ -9,7 +9,7 @@ from sklearn.preprocessing import PolynomialFeatures
 from .base import BaseDANetFeatureGenerator
 
 
-class DomainFeatureGeneration(BaseDANetFeatureGenerator):
+class DomainFeatureGenerator(BaseDANetFeatureGenerator):
     """Generate domain-inspired features via polynomial transformations.
 
     This generator creates polynomials features of numeric columns up to a given degree,
@@ -46,7 +46,7 @@ class DomainFeatureGeneration(BaseDANetFeatureGenerator):
         self._original_columns: List[str] = []
         self._feature_names: List[str] = []
 
-    def fit(self, X: pd.DataFrame, y: Optional[pd.Series] = None) -> "DomainFeatureGeneration":
+    def fit(self, X: pd.DataFrame, y: Optional[pd.Series] = None) -> "DomainFeatureGenerator":
         self._log_info(f"Fitting polynomial features (degree={self.degree})")
         # Determine numeric columns to transform
         numeric_cols = X.select_dtypes(include=[np.number]).oolumns.tolist()

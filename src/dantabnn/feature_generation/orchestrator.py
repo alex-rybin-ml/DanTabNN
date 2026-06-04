@@ -1,14 +1,18 @@
 """Orchestration pipeline or DANet feature generation."""
 
+from pathlib import Path
+from typing import Optional, List, Dict, Any, Union
 
+import numpy as np
 import pandas as pd
 import yaml
-from ..utils.logger import setup_logger
-from .base import BaseDANetFeatureGenerator
-from typing import Optional, List, Dict, Any, Union
-import numpy as np
-from pathlib import Path
 
+from .base import BaseDANetFeatureGenerator
+from .domain import DomainFeatureGenerator
+from .embedding import HighCardinalityEmbedder
+from .interaction import SelectiveInteractionGenerator
+from .temporal import TemporalAggregationGenerator
+from ..utils.logger import setup_logger
 
 logger = setup_logger(__name__)
 
@@ -179,6 +183,7 @@ class DANetFeatureGenerationPipeline:
             return False
         # Ensure all features are numeric (should be guaranteed by generators)
         return True
+
     @classmethod
     def from_yaml(cls, yaml_path: Union[str, Path]) -> "DANetFeatureGenerationPipeline":
         """Create a pipeline from a YAML configuration file.
@@ -189,24 +194,67 @@ class DANetFeatureGenerationPipeline:
         max_features: 500
         generators:
           - type: DomainFeatureGenerator
-          params:
-            degree: 2
-            interaction_only: false
-            include_bias: False
-          -type: TemporalAggregationGenerator
-          params:
-            date_column: "date"
-            groupby_columns: ["store_id", "product_id"]
-            windows: [7, 30]
-            aggregations: ["mean", "std", "min", "max"]
-          -type: SelectiveInteractionGenerator
-          params:
-            mi_threshold: 1.2
-            correlation_threshold: 0.98
-            max_interactions: 100
-          -type:
-
+            params:
+              degree: 2
+              interaction_only: false
+              include_bias: False
+          - type: TemporalAggregationGenerator
+            params:
+              date_column: "date"
+              groupby_columns: ["store_id", "product_id"]
+              windows: [7, 30]
+              aggregations: ["mean", "std", "min", "max"]
+          - type: SelectiveInteractionGenerator
+            params:
+              mi_threshold: 1.2
+              correlation_threshold: 0.98
+              max_interactions: 100
+          - type: HighCardinalityEmbedder
+            params:
+              cardinality_threshold: 100
+              smoothing: 10.0
+              unknown_value: 0.0
+        ```
         """
+        with open(yaml_path, "r") as f:
+            config = yaml.safe_load(f)
 
+        redundancy_threshold = config.get("redundancy_threshold", 0.98)
+        max_features = config.get("max_features", 500)
 
+        generators = []
+        for gen_config in config.get("generators", []):
+            gen_type = gen_config["type"]
+            params = gen_config.get("params", {})
+            generator = cls._instantiate_generator(gen_type, params)
+            generators.append(generator)
 
+        return cls(
+            generators=generators,
+            redundancy_threshold=redundancy_threshold,
+            max_features=max_features,
+        )
+
+    @staticmethod
+    def _instantiate_generator(gen_type: str, params: Dict[str, Any]) -> BaseDANetFeatureGenerator:
+        """Create a generator instance from type name and parameters."""
+        # Backward compatibility: rename 'columns' to 'numeric_columns' for DomainFeatureGenerator
+        if gen_type == "DomainFeatureGenerator" and "columns" in params:
+            import warnings
+            warnings.warn(
+                "The parameter 'columns' for DomainFeatureGenerator is deprecated. "
+                "Use 'numeric_columns' instead.",
+                DeprecationWarning,
+                stacklevel=2
+            )
+            params["numeric_columns"] = params.get("columns")
+
+        mapping = {
+            "DomainFeatureGenerator": DomainFeatureGenerator,
+            "TemporalAggregationGenerator": TemporalAggregationGenerator,
+            "SelectiveInteractionGenerator": SelectiveInteractionGenerator,
+            "HighCardinalityEmbedder": HighCardinalityEmbedder,
+        }
+        if gen_type not in mapping:
+            raise ValueError(f"Unknown generator type: {gen_type}")
+        return mapping[gen_type](**params)
