@@ -8,7 +8,7 @@ import pandas as pd
 import yaml
 
 from .base import BaseDANetFeatureGenerator
-from .domain import DomainFeatureGenerator
+from .domain import DomainFeatureGenerator, DomainRatioGenerator
 from .embedding import HighCardinalityEmbedder
 from .interaction import SelectiveInteractionGenerator
 from .temporal import TemporalAggregationGenerator
@@ -193,22 +193,52 @@ class DANetFeatureGenerationPipeline:
         redundancy_threshold: 0.98
         max_features: 500
         generators:
-          - type: DomainFeatureGenerator
+          # Recomended: domain-specific ratios and transforms (complements DANet)
+          - type: DomainRatioGenerator
             params:
-              degree: 2
-              interaction_only: false
-              include_bias: False
+              templates:
+                - type: ratio
+                  columns: [debt, income]
+                  output_name: debt_to_income
+                - type: log1p
+                  columns: [income]
+                  output_name: log_income
+                - type: ratio
+                  columns: [price, sqft]
+                  output_name: price_per_sqft
+                - type: cyclic_sin
+                  columns: [day_of_week]
+                  output_name: day_sin
+                  params:
+                    period: 7
+                - type: cyclic_cos
+                  columns: [day_of_week]
+                  output_name: day_cos
+                  params:
+                    period: 7
+
+          # Temporal aggregations (if date column is present)
           - type: TemporalAggregationGenerator
             params:
               date_column: "date"
               groupby_columns: ["store_id", "product_id"]
               windows: [7, 30]
               aggregations: ["mean", "std", "min", "max"]
-          - type: SelectiveInteractionGenerator
-            params:
-              mi_threshold: 1.2
-              correlation_threshold: 0.98
-              max_interactions: 100
+
+          # Deprecated: blind polynomial expansions (redundant with DANet attention)
+          # - type: DomainFeatureGenerator
+          #   params:
+          #     degree: 2
+          #     interaction_only: false
+          #     include_bias: False
+
+          # Deprecated: selective interactions (redundant with DANet cross network)
+          # - type: SelectiveInteractionGenerator
+          #   params:
+          #     mi_threshold: 1.2
+          #     correlation_threshold: 0.98
+          #     max_interactions: 100
+
           - type: HighCardinalityEmbedder
             params:
               cardinality_threshold: 100
@@ -251,10 +281,14 @@ class DANetFeatureGenerationPipeline:
 
         mapping = {
             "DomainFeatureGenerator": DomainFeatureGenerator,
+            "DomainRatioGenerator": DomainRatioGenerator,
             "TemporalAggregationGenerator": TemporalAggregationGenerator,
             "SelectiveInteractionGenerator": SelectiveInteractionGenerator,
             "HighCardinalityEmbedder": HighCardinalityEmbedder,
         }
         if gen_type not in mapping:
-            raise ValueError(f"Unknown generator type: {gen_type}")
+            raise ValueError(
+                f"Unknown generator type: {gen_type}"
+                f"Available types: {list(mapping.keys())}"
+            )
         return mapping[gen_type](**params)

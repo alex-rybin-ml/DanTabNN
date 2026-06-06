@@ -1,8 +1,11 @@
 """Temporal aggregation generator for group-level time-series statistics."""
+
+from typing import Optional, List, Dict, Any
+
 import numpy as np
 import pandas as pd
+
 from .base import BaseDANetFeatureGenerator
-from typing import Optional, List, Dict, Any
 from ..utils.hardware import get_optimal_backend
 
 
@@ -237,4 +240,3 @@ class TemporalAggregationGenerator(BaseDANetFeatureGenerator):
             "effective_backend": self._get_effective_backend(),
         })
         return metadata
-
