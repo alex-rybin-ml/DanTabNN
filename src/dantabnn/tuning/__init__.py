@@ -1,6 +1,6 @@
 """Hyperparameters tuning utilities."""
 
-from .hyperparam_tune import HyperparameterTuner
+from .hyperparam import HyperparameterTuner
 
 __all__ = [
     "HyperparameterTuner"

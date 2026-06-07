@@ -79,7 +79,7 @@ class DANetFeatureGenerationPipeline:
                 raise
 
         if not all_features:
-            self._feature_name = []
+            self._feature_names = []
             self.is_fitted = True
             return self
 
@@ -88,11 +88,11 @@ class DANetFeatureGenerationPipeline:
         logger.info(f"Total generated redundancy removal: {concatenated.shape[1]}")
 
         # Apply redundancy removal
-        selected_idx = self._removal_redundant(concatenated)
+        selected_idx = self._remove_redundant(concatenated)
         concatenated = concatenated.iloc[:, selected_idx]
         logger.info(f"Features after redundancy removal: {concatenated.shape[1]}")
 
-        # Enforce max_features limit (simple truncation by oder)
+        # Enforce max_features limit (simple truncation by order)
         if concatenated.shape[1] > self.max_features:
             logger.warning(
                 f"Number of features ({concatenated.shape[1]} exceed limit {self.max_features}, "
@@ -193,7 +193,7 @@ class DANetFeatureGenerationPipeline:
         redundancy_threshold: 0.98
         max_features: 500
         generators:
-          # Recomended: domain-specific ratios and transforms (complements DANet)
+          # Recommended: domain-specific ratios and transforms (complements DANet)
           - type: DomainRatioGenerator
             params:
               templates:

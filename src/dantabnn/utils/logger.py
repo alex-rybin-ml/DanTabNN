@@ -1,16 +1,18 @@
+"""Logging configuration."""
+
 import logging
 import sys
 
 
 def setup_logger(name: str, level: int = logging.INFO) -> logging.Logger:
-    """
-    Create and configure a logger.
+    """Create and configure a logger.
 
     Parameters
     ----------
     name : str
         Logger name (usually __name__),
     level : int
+        logging level.
 
     Returns
     -------
@@ -28,4 +30,5 @@ def setup_logger(name: str, level: int = logging.INFO) -> logging.Logger:
     handler = logging.StreamHandler(sys.stdout)
     handler.setFormatter(formatter)
     logger.addHandler(handler)
+    logger.propagate = False
     return logger

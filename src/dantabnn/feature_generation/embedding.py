@@ -34,7 +34,7 @@ class HighCardinalityEmbedder(BaseDANetFeatureGenerator):
             cardinality_threshold: int = 100,
             smoothing: float = 10.0,
             unknown_value: float = 0.0,
-            name: str = None,
+            name: Optional[str] = None,
     ):
         super().__init__(name=name)
         self.categorical_columns = categorical_columns
@@ -63,7 +63,7 @@ class HighCardinalityEmbedder(BaseDANetFeatureGenerator):
         cat_cols = X.select_dtypes(exclude=[np.number]).columns.tolist()
         if self.categorical_columns is not None:
             self._high_cardinality_columns = [
-                c for c in self.categorical_columns if c in cat_cols
+                str(c) for c in self.categorical_columns if c in cat_cols
             ]
             missing = set(self.categorical_columns) - set(cat_cols)
             if missing:

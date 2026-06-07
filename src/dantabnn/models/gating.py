@@ -18,14 +18,14 @@ class FeatureGating(nn.Module):
     ----------
     input_dim : int
         Number of input features.
-    temparature : float, default=1.0
+    temperature : float, default=1.0
         Temperature for Gumbel-Softmax relaxation. Lower values make the
         distribution more peaky (closer to one-hot).
     hard : bool, default=True
         If True, use straight-through estimator: during forward pass the
         sample are discretized (0 or 1) but gradients flow through the
         soft relaxation.
-    droupout : flot, default=0.0
+    dropout : flot, default=0.0
         Dropout applied to the gating logits (helps prevent over-reliance
         on a small subset of features).
     init_bias : float, default=0.0
@@ -47,7 +47,7 @@ class FeatureGating(nn.Module):
         self.hard = hard
         self.dropout = nn.Dropout(dropout)
 
-        # Learnable per-featuregating logits (one logit per feature)
+        # Learnable per-feature gating logits (one logit per feature)
         self.gate_logits = nn.Parameter(torch.zeros(input_dim))
         # Initialize with a small bias to encourage exploration
         nn.init.constant_(self.gate_logits, init_bias)

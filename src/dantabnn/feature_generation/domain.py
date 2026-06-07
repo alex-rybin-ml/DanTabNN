@@ -20,7 +20,7 @@ class DomainFeatureGenerator(BaseDANetFeatureGenerator):
     ----------
     degree : int, default=2
         Maximum degree of polynomial features.
-    interection_only : bool, default=False
+    interaction_only : bool, default=False
         If True, only interaction features are produced (no powers of a single feature).
     include_bias : bool, default=False
         If True, include a bias column (all polynomial powers are zero).
@@ -35,7 +35,7 @@ class DomainFeatureGenerator(BaseDANetFeatureGenerator):
             interaction_only: bool = False,
             include_bias: bool = False,
             numeric_columns: Optional[List[str]] = None,
-            name: str = None
+            name: Optional[str] = None
     ):
         super().__init__(name=name)
         self.degree = degree
@@ -114,7 +114,7 @@ class DomainFeatureGenerator(BaseDANetFeatureGenerator):
         return self._feature_names.copy()
 
     def validate_danet_compatibility(self) -> bool:
-        """Polinomial features are numeric and should be DANet-compatible."""
+        """Polynomial features are numeric and should be DANet-compatible."""
         # Check that al generated features are numeric (they are by construction)
         # Also ensure total number of features does not exceed DANet limit (500)
 

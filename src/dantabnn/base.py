@@ -437,7 +437,7 @@ class BaseNNPipeline(ABC):
             A *new* pipeline instance fitted with the best hyperparameters.
             The original instance remains unmodified.
         """
-        from .tuning.hyperparam_tune import HyperparameterTuner
+        from .tuning.hyperparam import HyperparameterTuner
         from .tuning.tune_utils import get_danet_param_grid
 
         # Auto-generate param_grid if not provided

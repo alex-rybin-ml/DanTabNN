@@ -1,7 +1,7 @@
 """Selective interaction generator for pairwise feature products."""
 
 from itertools import combinations
-from typing import Optional, Dict, List, Any
+from typing import Optional, Dict, List, Any, Tuple
 
 import numpy as np
 import pandas as pd
@@ -36,7 +36,7 @@ class SelectiveInteractionGenerator(BaseDANetFeatureGenerator):
             mi_threshold: float = 1.2,
             correlation_threshold: float = 0.98,
             max_interactions: int = 100,
-            name: str = None,
+            name: Optional[str] = None,
     ):
         super().__init__(name=name)
         self.numeric_columns = numeric_columns
@@ -46,7 +46,7 @@ class SelectiveInteractionGenerator(BaseDANetFeatureGenerator):
 
         # Internal state
         self._original_columns: List[str] = []
-        self._interaction_pairs: List[str] = []
+        self._interaction_pairs: List[Tuple] = []
         self._feature_names: List[str] = []
         self._mi_ratios: Dict[tuple, float] = {}
 
@@ -55,7 +55,7 @@ class SelectiveInteractionGenerator(BaseDANetFeatureGenerator):
         # Determine numeric columns
         numeric_cols = X.select_dtypes(include=[np.number]).columns.tolist()
         if self.numeric_columns is not None:
-            self._original_columns = [c for c in self.numeric_columns if c in numeric_cols]
+            self._original_columns = [str(c) for c in self.numeric_columns if c in numeric_cols]
             missing = set(self.numeric_columns) - set(numeric_cols)
             if missing:
                 self._log_warning(
@@ -162,11 +162,11 @@ class SelectiveInteractionGenerator(BaseDANetFeatureGenerator):
 
         missing = set(self._original_columns) - set(X.columns)
         if missing:
-            raise ValueError(f"Missing colums required for transformation: {missing}")
+            raise ValueError(f"Missing columns required for transformation: {missing}")
 
         # Impute missing values using stored means
         X_numeric = X[self._original_columns]
-        X_imputed = self._impute_numric(X_numeric, fit=False)
+        X_imputed = self._impute_numeric(X_numeric, fit=False)
 
         data = {}
         for a, b in self._interaction_pairs:

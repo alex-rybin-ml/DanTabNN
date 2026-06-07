@@ -1,4 +1,4 @@
-"""Abstract base class for DANet feauture generators."""
+"""Abstract base class for DANet feature generators."""
 
 
 from abc import ABC, abstractmethod
@@ -16,10 +16,10 @@ class BaseDANetFeatureGenerator(ABC):
     """Abstract base class for feature generators that produce DANet-compatible features.
 
     Concrete subclasses must implement `fit`, `transform`, `get_feature_names`,
-    and 'validate_danet_compatibility`.
+    and `validate_danet_compatibility`.
     """
 
-    def __init__(self, name: str = None):
+    def __init__(self, name: Optional[str] = None):
         """
         Parameters
         ----------
@@ -49,7 +49,7 @@ class BaseDANetFeatureGenerator(ABC):
         X: pd.DataFrame
             Input dataframe with the original columns.
         y: pd.Series, optional
-            Target columns (may be used for supervised feature generation).
+            Target columns (maybe used for supervised feature generation).
 
         Returns
         -------
@@ -70,8 +70,8 @@ class BaseDANetFeatureGenerator(ABC):
         Returns
         -------
         pd.DataFrame
-            DataFrame containing only the newly generated features (same index as X).
-            The number of columns must match `len(self.get_features_names()`.
+            Data Frame containing only the newly generated features (same index as X).
+            The number of columns must match `len(self.get_features_names())`.
         """
         pass
 
@@ -163,7 +163,7 @@ class BaseDANetFeatureGenerator(ABC):
         Returns
         -------
         pd.DataFrame
-            DataFrame with NaN imputed.
+            Data Frame with NaN imputed.
         """
         numeric_cols = X.select_dtypes(include=[np.number]).columns.tolist()
         if not numeric_cols:

@@ -1,6 +1,6 @@
 """Temporal aggregation generator for group-level time-series statistics."""
 
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
 
 import numpy as np
 import pandas as pd
@@ -35,7 +35,7 @@ class TemporalAggregationGenerator(BaseDANetFeatureGenerator):
         observation up to the current row).
     backend : str, default='auto'
         Computation backend. Allowed values: 'auto', 'pandas', 'cudf', 'conv', 'numba'.
-        'auto' selects the optimal backend based on hardware detection (CUDA availability),
+        'auto' selects the optimal backend based on hardware detection (CUDA availability,
         cuDF installation, etc.). 'pandas' uses pandas rolling (CPU). 'cudf' uses cuDF
         rolling (GPU). 'conv' uses PyTorch 1D convolutions (GPU/CPU). 'numba' uses
         Numba-accelerated loops (CPU).
@@ -46,11 +46,11 @@ class TemporalAggregationGenerator(BaseDANetFeatureGenerator):
             date_column: str,
             groupby_columns: List[str],
             numeric_columns: Optional[List[str]] = None,
-            windows: List[int] = (7, 30),
-            aggregations: List[str] = ("mean", "std", "min", "max"),
+            windows: Tuple[int, ...] = (7, 30),
+            aggregations: Tuple[str, ...] = ("mean", "std", "min", "max"),
             expanding: bool = True,
             backend: str = "auto",
-            name: str = None,
+            name: Optional[str] = None,
     ):
         super().__init__(name=name)
         self.date_column = date_column
@@ -97,11 +97,11 @@ class TemporalAggregationGenerator(BaseDANetFeatureGenerator):
 
         if self.numeric_columns is not None:
             # Keep only requested columns that are numeric
-            self._all_numeric_columns = [c for c in self.numeric_columns if c in numeric_cols]
+            self._all_numeric_columns = [str(c) for c in self.numeric_columns if c in numeric_cols]
             missing = set(self.numeric_columns) - set(numeric_cols)
             if missing:
                 self._log_warning(
-                    f"Requested numeric columns {missing} are not numeric or missing; they will be ingored."
+                    f"Requested numeric columns {missing} are not numeric or missing; they will be ignored."
                 )
         else:
             self._all_numeric_columns = numeric_cols
@@ -130,7 +130,7 @@ class TemporalAggregationGenerator(BaseDANetFeatureGenerator):
         if not self.is_fitted:
             raise RuntimeError("Generator must be fitted before transform.")
         if len(self._all_numeric_columns) == 0:
-            return pd.DataFrame
+            return pd.DataFrame(index=X.index)
 
         # Ensure required columns are present
         required = set([self.date_column] + self.groupby_columns + self._all_numeric_columns)
@@ -203,7 +203,7 @@ class TemporalAggregationGenerator(BaseDANetFeatureGenerator):
     def _transform_conv(self, X: pd.DataFrame) -> pd.DataFrame:
         # PyTorch 1D convolution backend (GPU/CPU)
         self._log_warning(
-            "Conv backend (Pytorch) is not yet implemented. Falling back to pandas."
+            "Conv backend (pytorch) is not yet implemented. Falling back to pandas."
         )
         return self._transform_pandas(X)
 
