@@ -1,6 +1,6 @@
 """Multiclass classification pipeline."""
 
-from typing import List, Dict
+from typing import List, Dict, Callable
 
 import numpy as np
 import pandas as pd
@@ -45,7 +45,14 @@ class MulticlassClassificationPipeline(BaseNNPipeline):
             hidden_dims=self.hidden_dims,
             dropout=self.dropout,
             attention_heads=self.attention_heads,
-            use_sample_attention=False
+            use_sample_attention=False,
+            gating_type=self.gating_type,
+            gating_k=self.gating_k,
+            gating_temperature=self.gating_temperature,
+            gating_hard=self.gating_hard,
+            gating_dropout=self.gating_dropout,
+            gating_init_bias=self.gating_init_bias,
+            use_batch_norm=self.use_batch_norm,
         )
 
         # Output layer: logits for each class
@@ -58,7 +65,7 @@ class MulticlassClassificationPipeline(BaseNNPipeline):
         """Cross-engtropy loss."""
         return nn.CrossEntropyLoss()
     
-    def _get_metrics(self) -> Dict[str, callable]:
+    def _get_metrics(self) -> Dict[str, Callable]:
         """Default metrics for multiclass classification."""
         return {
             "accuracy": accuracy_score,

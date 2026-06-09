@@ -84,7 +84,7 @@ class FeatureGating(nn.Module):
             training = self.training
 
         # Expand per-feature logits to batch dimension
-        logits = self.get_logits.expand(x.size(0), -1)  # (B, D)
+        logits = self.gate_logits.expand(x.size(0), -1)  # (B, D)
 
         # Apply dropout to logits during training
         if training:

@@ -1,6 +1,6 @@
 """Regression pipeline."""
 
-from typing import Dict
+from typing import Dict, Callable
 
 import pandas as pd
 import torch
@@ -22,7 +22,14 @@ class RegressionPipeline(BaseNNPipeline):
             hidden_dims=self.hidden_dims,
             dropout=self.dropout,
             attention_heads=self.attention_heads,
-            use_sample_attention=False
+            use_sample_attention=False,
+            gating_type=self.gating_type,
+            gating_k=self.gating_k,
+            gating_temperature=self.gating_temperature,
+            gating_hard=self.gating_hard,
+            gating_dropout=self.gating_dropout,
+            gating_init_bias=self.gating_init_bias,
+            use_batch_norm=self.use_batch_norm,
         )
 
         # Output layer: single continious value
@@ -30,10 +37,10 @@ class RegressionPipeline(BaseNNPipeline):
         return model
     
     def _get_loss_fn(self) -> nn.Module:
-        """Mean squared error loss."""
-        return nn.MSELoss()
+        """Huber loss (more robust to outliers than MSE)."""
+        return nn.HuberLoss(delta=1.0)
     
-    def _get_metrics(self) -> Dict[str, callable]:
+    def _get_metrics(self) -> Dict[str, Callable]:
         """Default metris for regression."""
         return {
             "mse": mean_squared_error,

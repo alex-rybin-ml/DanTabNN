@@ -154,12 +154,14 @@ class TemporalAggregationGenerator(BaseDANetFeatureGenerator):
         # Sort by group and date (important for rolling windows)
         X_sorted = X.sort_values(by=self.groupby_columns + [self.date_column]).copy()
         results = []
-        for _, group in X_sorted.groupby(self.groupby_columns + [self.date_column]).copy():
+        for _, group in X_sorted.groupby(self.groupby_columns + [self.date_column]):
+            group = group.copy()
             for col in self._all_numeric_columns:
                 series = group[col]
-                # Rolling windows
+                # Rolling windows — shift(1) prevents data leak (current row
+                # must not see its own value in the aggregation)
                 for w in self.windows:
-                    rolling = series.rolling(window=w, min_periods=1)
+                    rolling = series.shift(1).rolling(window=w, min_periods=w)
                     for agg in self.aggregations:
                         if agg in self._supported_aggs:
                             agg_series = getattr(rolling, agg)()
@@ -168,7 +170,7 @@ class TemporalAggregationGenerator(BaseDANetFeatureGenerator):
                         group[f"temp_{col}_{agg}_w{w}"] = agg_series.values
                 # Expanding window
                 if self.expanding:
-                    expanding = series.expanding(min_period=1)
+                    expanding = series.expanding(min_periods=1)
                     for agg in self.aggregations:
                         if agg in self._supported_aggs:
                             agg_series = getattr(expanding, agg)()

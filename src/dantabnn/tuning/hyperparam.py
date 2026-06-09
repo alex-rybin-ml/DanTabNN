@@ -97,10 +97,19 @@ class HyperparameterTuner:
     def _make_cv_splitter(self, y: Optional[np.ndarray] = None) -> BaseCrossValidator:
         if isinstance(self.cv, BaseCrossValidator):
             return self.cv
-        if y is not None and len(np.unique(y)) > 1:
-            return StratifiedKFold(
-                n_splits=self.cv, shuffle=True, random_state=self.random_state
-            )
+        # Only use StratifiedKFold for classification-like targets (discrete, <20 classes)
+        if y is not None:
+            n_unique = len(np.unique(y))
+            if n_unique > 1 and n_unique < 20:
+                try:
+                    y_int = y.astype(int)
+                    if np.array_equal(y, y_int.astype(y.dtype)):
+                        return StratifiedKFold(
+                            n_splits=self.cv, shuffle=True,
+                            random_state=self.random_state,
+                        )
+                except (ValueError, TypeError):
+                    pass
         return KFold(n_splits=self.cv, shuffle=True, random_state=self.random_state)
 
     # ------------------------------------------------------------------ #
@@ -127,7 +136,12 @@ class HyperparameterTuner:
             # ---- Hold-out mode: single fit on full train, evaluate on val ----
             estimator = self.pipeline.__class__(**params)
             estimator.fit(df_train, df_val, verbose=0)
-            score = estimator.evaluate(df_val, scoring=self.scoring)
+            score_val = estimator.evaluate(df_val)
+            # Extract the first metric as the score
+            if score_val:
+                score = next(iter(score_val.values()))
+            else:
+                score = 0.0
 
             trial.report(score, step=0)
             if trial.should_prune():
@@ -144,7 +158,11 @@ class HyperparameterTuner:
 
                 estimator = self.pipeline.__class__(**params)
                 estimator.fit(fold_train, fold_val, verbose=0)
-                fold_score = estimator.evaluate(fold_val, scoring=self.scoring)
+                fold_score_val = estimator.evaluate(fold_val)
+                if fold_score_val:
+                    fold_score = next(iter(fold_score_val.values()))
+                else:
+                    fold_score = 0.0
                 scores.append(fold_score)
 
                 trial.report(fold_score, step=fold_idx)

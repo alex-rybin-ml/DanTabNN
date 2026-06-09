@@ -4,7 +4,7 @@ import warnings
 from abc import ABC, abstractmethod
 from collections import OrderedDict
 from pathlib import Path
-from typing import List, Optional, Dict, Tuple, Union, Any
+from typing import List, Optional, Dict, Tuple, Union, Any, Callable
 
 import numpy as np
 import pandas as pd
@@ -28,10 +28,21 @@ class BaseNNPipeline(ABC):
             categorical_features: List[str],
             target_column: str,
 
-            # Model architecture 
-            hidden_dims: List[int] = [64, 32],
+            # Model architecture — wider 3-layer default from v2-baseline experiments
+            hidden_dims: List[int] = [128, 64, 32],
             dropout: float = 0.2,
             attention_heads: int = 4,
+
+            # Feature gating (differentiable feature selection)
+            gating_type: str = 'soft',
+            gating_k: int = 10,
+            gating_temperature: float = 1.0,
+            gating_hard: bool = True,
+            gating_dropout: float = 0.0,
+            gating_init_bias: float = 0.0,
+
+            # Batch normalization
+            use_batch_norm: bool = False,
 
             # Training
             batch_size: int = 32,
@@ -60,6 +71,17 @@ class BaseNNPipeline(ABC):
         self.hidden_dims = hidden_dims
         self.dropout = dropout
         self.attention_heads = attention_heads
+
+        # Feature gating
+        self.gating_type = gating_type
+        self.gating_k = gating_k
+        self.gating_temperature = gating_temperature
+        self.gating_hard = gating_hard
+        self.gating_dropout = gating_dropout
+        self.gating_init_bias = gating_init_bias
+
+        # Batch normalization
+        self.use_batch_norm = use_batch_norm
 
         # Training hyperparameters
         self.batch_size = batch_size
@@ -93,9 +115,10 @@ class BaseNNPipeline(ABC):
 
     def _set_seed(self):
         """set random seeds for reproducibility"""
+        torch.manual_seed(self.random_state)
         torch.cuda.manual_seed(self.random_state)
         np.random.seed(self.random_state)
-        if torch.device == "cuda":
+        if self.device == "cuda":
             torch.cuda.manual_seed_all(self.random_state)
 
     @abstractmethod
@@ -123,8 +146,8 @@ class BaseNNPipeline(ABC):
         pass
 
     @abstractmethod
-    def _get_metrics(self) -> Dict[str, callable]:
-        """Return a dictionary of metric funcitons (name -> callable)."""
+    def _get_metrics(self) -> Dict[str, Callable]:
+        """Return a dictionary of metric functions (name -> callable)."""
         pass
 
     def _prepare_features(
@@ -177,10 +200,14 @@ class BaseNNPipeline(ABC):
         features = np.hstack([numeric_scaled, categorical_encoded]) if (
                 numeric_scaled.size > 0 or categorical_encoded.size > 0) else np.empty((len(df), 0))
         features_names = (
-            [f"num_{f}" for f in self.numeric_features] + 
-            [f"cat_{f}" for f in self.categorical_features for _ in range(
-                self.encoder.n_values_per_feature if self.encoder else 1)
-             ]
+            [f"num_{f}" for f in self.numeric_features] +
+            [
+                f"cat_{self.categorical_features[i]}"
+                for i in range(len(self.categorical_features))
+                for _ in range(
+                    self.encoder.n_values_per_feature[i] if self.encoder else 1
+                )
+            ]
         )
         return torch.FloatTensor(features).to(self.device), features_names
 
@@ -232,12 +259,12 @@ class BaseNNPipeline(ABC):
 
         # Prepare features and target for train, validation data 
         train_features, train_target, self.feature_names = self._prepare_data(df_train, fit=True)
-        val_features, val_target, _ = self._prepare_data(df_train, fit=False) if df_val else (None, None, None)
+        val_features, val_target, _ = self._prepare_data(df_val, fit=False) if df_val is not None else (None, None, None)
 
         # Determine input/output dimensions
         input_dim = train_features.shape[1]
         output_dim = self._get_output_dim(train_target)
-        logger.debug("Input dim: {input_dim}, ouput dim: {output_dim}")
+        logger.debug(f"Input dim: {input_dim}, output dim: {output_dim}")
 
         # Build model 
         self.model = self._build_model(input_dim, output_dim).to(self.device)
@@ -269,6 +296,7 @@ class BaseNNPipeline(ABC):
                 pred = self.model(batch_X)
                 loss = loss_fn(pred, batch_y)
                 loss.backward()
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
                 optimizer.step()
                 epoch_train_loss += loss.item() * batch_X.size(0)
 
@@ -339,10 +367,10 @@ class BaseNNPipeline(ABC):
             raise RuntimeError("Pipline not fitted. Call fit first.")
         self.model.eval()
         features, _ = self._prepare_features(df, fit=False)
-        loader = self._create_dataloader(features, shuffle=True)
+        loader = self._create_dataloader(features, target=None, shuffle=False)
         predictions = []
         with torch.no_grad():
-            for batch_X, _ in loader:
+            for (batch_X,) in loader:
                 pred = self.model(batch_X)
                 predictions.append(pred.cpu().numpy())
         return np.vstack(predictions)   
@@ -536,14 +564,20 @@ class BaseNNPipeline(ABC):
         if scaler_path.exists():
             self.scaler = joblib.load(scaler_path)
         if encoder_path.exists():
-            self.scaler = joblib.load(encoder_path)
+            self.encoder = joblib.load(encoder_path)
 
-        # Rebuild Model
-        dummy_features = pd.DataFrame(
-            columns=self.numeric_features + self.categorical_features
-        )
-        features, self.feature_names = self._prepare_features(dummy_features, fit=False)
-        input_dim = features.shape[1] if features.shape[1] > 0 else 1
+        # Rebuild Model — compute input_dim from feature counts
+        num_features = len(self.numeric_features)
+        if self.encode_categorical and self.encoder is not None:
+            cat_features = sum(
+                len(self.encoder.categories_[i])
+                for i in range(len(self.categorical_features))
+            )
+        elif self.categorical_features:
+            cat_features = len(self.categorical_features)  # fallback if no encoder fitted
+        else:
+            cat_features = 0
+        input_dim = num_features + cat_features if (num_features + cat_features) > 0 else 1
         output_dim = self._get_output_dim(torch.zeros(0))
 
         self.model = self._build_model(input_dim, output_dim).to(self.device)

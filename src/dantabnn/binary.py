@@ -1,6 +1,6 @@
 """Binary classification pipeline."""
 
-from typing import Dict
+from typing import Dict, Callable
 
 import numpy as np
 import pandas as pd
@@ -17,7 +17,7 @@ class BinaryClassificationPipeline(BaseNNPipeline):
     def _build_model(self, input_dim: int, output_dim: int):
         """Build a Danet module with a single-output linear layer."""
 
-        from models.danet import DANetModule
+        from .models.danet import DANetModule
 
         model = DANetModule(
             input_dim=input_dim,
@@ -25,6 +25,13 @@ class BinaryClassificationPipeline(BaseNNPipeline):
             dropout=self.dropout,
             attention_heads=self.attention_heads,
             use_sample_attention=False,
+            gating_type=self.gating_type,
+            gating_k=self.gating_k,
+            gating_temperature=self.gating_temperature,
+            gating_hard=self.gating_hard,
+            gating_dropout=self.gating_dropout,
+            gating_init_bias=self.gating_init_bias,
+            use_batch_norm=self.use_batch_norm,
         )
 
         # Output layer: single logit
@@ -35,7 +42,7 @@ class BinaryClassificationPipeline(BaseNNPipeline):
         """Binary cross-entropy loss with logits"""
         return nn.BCEWithLogitsLoss()
     
-    def _get_metrics(self) -> Dict[str, callable]:
+    def _get_metrics(self) -> Dict[str, Callable]:
         """Default metrics for binary classification."""
         return {
             "accuracy": lambda y_true, y_pred: accuracy_score(y_true, y_pred > 0.5),

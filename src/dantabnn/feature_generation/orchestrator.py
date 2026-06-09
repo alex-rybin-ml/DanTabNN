@@ -35,7 +35,7 @@ class DANetFeatureGenerationPipeline:
 
     def __init__(
             self,
-            generators: Optional[List[BaseDANetFeatureGenerator]],
+            generators: Optional[List[BaseDANetFeatureGenerator]] = None,
             redundancy_threshold: float = 0.98,
             max_features: int = 500
     ):

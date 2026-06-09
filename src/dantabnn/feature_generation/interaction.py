@@ -116,7 +116,7 @@ class SelectiveInteractionGenerator(BaseDANetFeatureGenerator):
         # Compute MI for individual features
         individual_mi = {}
         for col in self._original_columns:
-            mi = mi_func(X[[col]], y_vals).items()
+            mi = mi_func(X[[col]], y_vals).item()
             individual_mi[col] = mi
 
         # Compute MI for interaction products

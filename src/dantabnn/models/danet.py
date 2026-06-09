@@ -96,7 +96,7 @@ class DANetModule(nn.Module):
     def __init__(
             self,
             input_dim: int,
-            hidden_dims: List[int] = [64, 32],
+            hidden_dims: List[int] = [128, 64, 32],
             dropout: float = 0.2,
             attention_heads: int = 4,
             use_sample_attention: bool = False,
@@ -111,6 +111,7 @@ class DANetModule(nn.Module):
             gating_hard: bool = True,
             gating_dropout: float = 0.0,
             gating_init_bias: float = 0.0,
+            use_batch_norm: bool = False,
     ):
         super().__init__()
         self.input_dim = input_dim
@@ -125,7 +126,7 @@ class DANetModule(nn.Module):
         # Feature gating (differentiable feature selection)
         self.feature_gating = create_feature_gating(
             input_dim=input_dim,
-            geting_type=gating_type,
+            gating_type=gating_type,
             k=gating_k,
             temperature=gating_temperature,
             hard=gating_hard,
@@ -165,11 +166,16 @@ class DANetModule(nn.Module):
             dropout=dropout
         )
 
+        # Batch norm (optional, helps convergence especially for regression)
+        self.use_batch_norm = use_batch_norm
+
         # Feed forward network 
         ff_layers = []
         dims = [hidden_dims[0]] + hidden_dims[1:] if hidden_dims else [input_dim]
         for i in range(len(dims) - 1):
             ff_layers.append(nn.Linear(dims[i], dims[i + 1]))
+            if use_batch_norm:
+                ff_layers.append(nn.BatchNorm1d(dims[i + 1]))
             ff_layers.append(nn.ReLU())
             ff_layers.append(nn.Dropout(dropout))
         self.ff = nn.Sequential(*ff_layers) if ff_layers else nn.Identity()
@@ -193,7 +199,7 @@ class DANetModule(nn.Module):
             Output tensor of shape (batch_size, output_dim).
         """
         # Apply feature gating before embedding/attention
-        if self.faeture_gating is not None:
+        if self.feature_gating is not None:
             # The mask from the pipeline only covers numeric+generated features,
             # but x includes missing indicators and categorical encoded features.
             # Pad the mask with zeros (not missing) for the remaining features.
@@ -222,9 +228,9 @@ class DANetModule(nn.Module):
         # Remove sequence dimension
         x = x.squeeze(1)
 
-        # Interaction layer (sparce cross-date features)
+        # Interaction layer (sparse cross-date features)
         if self.interaction is not None:
-            x = self.interaction
+            x = self.interaction(x)
 
         # Feed forward
         x = self.ff(x)

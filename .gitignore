@@ -10,3 +10,8 @@ plans/
 
 # Virtual environments
 .venv
+mlruns
+mlflow.db
+.coverage
+coverage.xml
+experiments
