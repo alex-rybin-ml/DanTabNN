@@ -15,6 +15,9 @@ from torch.utils.data import DataLoader, TensorDataset
 
 from .preprocessing.encoder import CategoricalEncoder
 from .preprocessing.scaler import StandardScaler
+from .preprocessing.outlier import OutlierClipper
+from .preprocessing.imputer import NaNImputer
+from .preprocessing.feature_engineer import AutoFeatureEngineer
 from .utils.logger import setup_logger
 from .utils.metrics import compute_metrics
 
@@ -54,6 +57,10 @@ class BaseNNPipeline(ABC):
             # Preprocessing
             scale_numeric: bool = True,
             encode_categorical: bool = True,
+            clip_outliers: bool = True,
+            impute_missing: bool = True,
+            engineer_features: bool = True,
+            engineer_max_features: int = 100,
 
             # Device
             device: Optional[str] = None,
@@ -93,6 +100,10 @@ class BaseNNPipeline(ABC):
         # Preprocessing flags
         self.scale_numeric = scale_numeric
         self.encode_categorical = encode_categorical
+        self.clip_outliers = clip_outliers
+        self.impute_missing = impute_missing
+        self.engineer_features = engineer_features
+        self.engineer_max_features = engineer_max_features
 
         # Device
         if device is None:
@@ -107,6 +118,9 @@ class BaseNNPipeline(ABC):
         self.model: Optional[nn.Module] = None 
         self.scaler: Optional[StandardScaler] = None 
         self.encoder: Optional[CategoricalEncoder] = None
+        self.outlier_clipper: Optional[OutlierClipper] = None
+        self.imputer: Optional[NaNImputer] = None
+        self.feature_engineer: Optional[AutoFeatureEngineer] = None
         self.feature_names: Optional[List[str]] = None
         self.is_fitted = False 
         self.history: Dict[str, List[float]] = {}
@@ -153,26 +167,66 @@ class BaseNNPipeline(ABC):
     def _prepare_features(
             self, df: pd.DataFrame, fit: bool = False
     ) -> Tuple[torch.Tensor, List[str]]:
-        """Preprocess numeric and categorical features
-        
+        """Preprocess numeric and categorical features.
+
+        Pipeline:
+        1. Impute missing values (if enabled)
+        2. Clip outliers via IQR (if enabled)
+        3. Engineer features — x² + log1p auto-detection (if enabled)
+        4. Scale numeric
+        5. Encode categorical
+        6. Combine into single tensor
+
         Parameters
         ----------
         df : pd.DataFrame
             Input dataframe
-        fit : bool 
-            Whether to fit the scaler/encoder (True) or use already fitted ones (False).
+        fit : bool
+            Whether to fit the preprocessors (True) or use already fitted ones (False).
 
         Returns
         -------
         torch.Tensor
             Preprocessed tensor of shape (n_samples, n_features).
-        Listp[str]
+        List[str]
             Names of the features after preprocessing.
         """
-        numeric_data = df[self.numeric_features].values if self.numeric_features else np.empty((len(df), 0))
+        numeric_data = df[self.numeric_features].values.astype(np.float64) if self.numeric_features else np.empty((len(df), 0))
         categorical_data = df[self.categorical_features].values if self.categorical_features else np.empty((len(df), 0))
 
-        # Scale numeric features
+        # Step 0: Impute missing values
+        if self.impute_missing and numeric_data.size > 0:
+            if fit:
+                self.imputer = NaNImputer()
+                numeric_data = self.imputer.fit_transform(numeric_data)
+            else:
+                if self.imputer is None:
+                    raise RuntimeError("Imputer not fitted. Call fit first.")
+                numeric_data = self.imputer.transform(numeric_data)
+
+        # Step 1: Clip outliers via IQR
+        if self.clip_outliers and numeric_data.size > 0:
+            if fit:
+                self.outlier_clipper = OutlierClipper()
+                numeric_data = self.outlier_clipper.fit_transform(numeric_data)
+            else:
+                if self.outlier_clipper is None:
+                    raise RuntimeError("OutlierClipper not fitted. Call fit first.")
+                numeric_data = self.outlier_clipper.transform(numeric_data)
+
+        # Step 2: Engineer features (x² + log1p auto-detection)
+        if self.engineer_features and numeric_data.size > 0:
+            if fit:
+                self.feature_engineer = AutoFeatureEngineer(
+                    max_generated=self.engineer_max_features,
+                )
+                numeric_data = self.feature_engineer.fit_transform(numeric_data)
+            else:
+                if self.feature_engineer is None:
+                    raise RuntimeError("FeatureEngineer not fitted. Call fit first.")
+                numeric_data = self.feature_engineer.transform(numeric_data)
+
+        # Step 3: Scale numeric features
         if self.scale_numeric and numeric_data.size > 0:
             if fit:
                 self.scaler = StandardScaler()
@@ -184,7 +238,7 @@ class BaseNNPipeline(ABC):
         else:
             numeric_scaled = numeric_data
 
-        # Encode categorical features
+        # Step 4: Encode categorical features
         if self.encode_categorical and categorical_data.size > 0:
             if fit:
                 self.encoder = CategoricalEncoder()
@@ -196,20 +250,32 @@ class BaseNNPipeline(ABC):
         else:
             categorical_encoded = categorical_data
 
-        # Combine features
+        # Step 5: Combine features
         features = np.hstack([numeric_scaled, categorical_encoded]) if (
                 numeric_scaled.size > 0 or categorical_encoded.size > 0) else np.empty((len(df), 0))
-        features_names = (
-            [f"num_{f}" for f in self.numeric_features] +
-            [
+
+        # Build feature names
+        if self.engineer_features and self.feature_engineer is not None:
+            n_orig = len(self.numeric_features)
+            n_gen = numeric_scaled.shape[1] - n_orig if numeric_scaled.ndim > 1 else 0
+            gen_names = [f"gen_{i}" for i in range(n_gen)] if n_gen > 0 else []
+            num_names = [f"num_{f}" for f in self.numeric_features] + gen_names
+        else:
+            num_names = [f"num_{f}" for f in self.numeric_features]
+
+        if self.encode_categorical and self.encoder is not None:
+            cat_names = [
                 f"cat_{self.categorical_features[i]}"
                 for i in range(len(self.categorical_features))
                 for _ in range(
-                    self.encoder.n_values_per_feature[i] if self.encoder else 1
+                    self.encoder.n_values_per_feature[i]
                 )
             ]
-        )
-        return torch.FloatTensor(features).to(self.device), features_names
+        else:
+            cat_names = []
+
+        features_names = num_names + cat_names
+        return torch.FloatTensor(features.astype(np.float32)).to(self.device), features_names
 
     def _prepare_target(self, df: pd.DataFrame) -> torch.Tensor:
         """Ectract target column and convert to tensor."""
@@ -275,7 +341,8 @@ class BaseNNPipeline(ABC):
             weight_decay=self.weight_decay,
         )
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, mode="min", patience=self.early_stopping_patience // 2
+            optimizer, mode="min", patience=max(5, self.early_stopping_patience // 2),
+            factor=0.5, min_lr=1e-6,
         )
 
         # Training loop
@@ -286,6 +353,8 @@ class BaseNNPipeline(ABC):
         self.history = {"train_loss": [], "val_loss": []}
         best_val_loss = float("inf")
         patience_counter = 0
+        min_delta = 1e-4
+        min_epochs = max(10, self.early_stopping_patience)
 
         for epoch in range(self.epochs):
             # Training 
@@ -319,14 +388,21 @@ class BaseNNPipeline(ABC):
                 epoch_val_loss = None
                 scheduler.step(epoch_train_loss)
 
-            # Early stopping 
-            if val_loader is not None:
-                if epoch_val_loss < best_val_loss:
+            # Early stopping — requires minimum epochs + meaningful improvement
+            if val_loader is not None and epoch >= min_epochs:
+                if epoch_val_loss < best_val_loss - min_delta:
                     best_val_loss = epoch_val_loss
                     patience_counter = 0
                     self.best_epoch = epoch
-                    # Save best model state
                     self.best_state = self.model.state_dict()
+                elif epoch_val_loss < best_val_loss:
+                    # Marginal improvement (< min_delta) — update best but also count patience
+                    best_val_loss = epoch_val_loss
+                    self.best_state = self.model.state_dict()
+                    patience_counter += 1
+                    if patience_counter > self.early_stopping_patience:
+                        logger.info(f"Early stopping triggered at epoch {epoch}")
+                        break
                 else:
                     patience_counter += 1
                     if patience_counter > self.early_stopping_patience:
@@ -531,6 +607,12 @@ class BaseNNPipeline(ABC):
                 joblib.dump(self.scaler, path / "scaler.joblib")
             if self.encoder is not None:
                 joblib.dump(self.encoder, path / "encoder.joblib")
+            if self.outlier_clipper is not None:
+                joblib.dump(self.outlier_clipper, path / "outlier_clipper.joblib")
+            if self.imputer is not None:
+                joblib.dump(self.imputer, path / "imputer.joblib")
+            if self.feature_engineer is not None:
+                joblib.dump(self.feature_engineer, path / "feature_engineer.joblib")
 
             # Save hyperparameters
             joblib.dump(self.hyperparameters, path / "hyperparameters.joblib")
@@ -560,14 +642,25 @@ class BaseNNPipeline(ABC):
         # Load Processing objects
         scaler_path = path / "scaler.joblib"
         encoder_path = path / "encoder.joblib"
+        outlier_path = path / "outlier_clipper.joblib"
+        imputer_path = path / "imputer.joblib"
+        engineer_path = path / "feature_engineer.joblib"
 
         if scaler_path.exists():
             self.scaler = joblib.load(scaler_path)
         if encoder_path.exists():
             self.encoder = joblib.load(encoder_path)
+        if outlier_path.exists():
+            self.outlier_clipper = joblib.load(outlier_path)
+        if imputer_path.exists():
+            self.imputer = joblib.load(imputer_path)
+        if engineer_path.exists():
+            self.feature_engineer = joblib.load(engineer_path)
 
         # Rebuild Model — compute input_dim from feature counts
         num_features = len(self.numeric_features)
+        if self.engineer_features and self.feature_engineer is not None:
+            num_features = self.feature_engineer.n_features_out
         if self.encode_categorical and self.encoder is not None:
             cat_features = sum(
                 len(self.encoder.categories_[i])
@@ -618,7 +711,13 @@ class BaseNNPipeline(ABC):
 
     def get_preprocessor(self):
         """Return the fitted preprocessing objects."""
-        return {"scaler": self.scaler, "encoder": self.encoder}
+        return {
+            "scaler": self.scaler,
+            "encoder": self.encoder,
+            "outlier_clipper": self.outlier_clipper,
+            "imputer": self.imputer,
+            "feature_engineer": self.feature_engineer,
+        }
 
     def _get_output_dim(self, y: torch.Tensor) -> int:
         """Determine ouput dimension base on target tensor."""
@@ -638,7 +737,11 @@ class BaseNNPipeline(ABC):
     @property
     def hyperparameters(self):
         """Get pipline parameters."""
-        exclude = {"model", "scaler", "encoder", "is_fitted", "history", "best_state"}
+        exclude = {
+            "model", "scaler", "encoder",
+            "outlier_clipper", "imputer", "feature_engineer",
+            "is_fitted", "history", "best_state",
+        }
         return {k: v for k, v in self.__dict__.items() if not k.startswith('_') and k not in exclude}
 
     def __repr__(self):

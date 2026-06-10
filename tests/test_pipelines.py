@@ -313,6 +313,7 @@ class TestBaseNNPipeline:
             numeric_features=["a", "b"], categorical_features=[], target_column="y",
             epochs=5,
             scale_numeric=True,
+            engineer_features=False,  # v7 default adds x², test expects raw count
         )
         df = pd.DataFrame({"a": [1.0, 2.0], "b": [3.0, 4.0], "y": [0.0, 1.0]})
         features, names = pipe._prepare_features(df, fit=True)
@@ -335,6 +336,7 @@ class TestBaseNNPipeline:
         pipe = _MinimalPipeline(
             numeric_features=["a"], categorical_features=[], target_column="y",
             scale_numeric=False,
+            engineer_features=False,  # v7 default adds x², test expects raw count
         )
         df = pd.DataFrame({"a": [1.0, 2.0, 3.0], "y": [0.0, 1.0, 1.0]})
         features, _ = pipe._prepare_features(df, fit=True)

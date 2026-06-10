@@ -1,6 +1,7 @@
 """Regression pipeline."""
 
-from typing import Dict, Callable
+import numpy as np
+from typing import Dict, Callable, Optional
 
 import pandas as pd
 import torch
@@ -11,7 +12,21 @@ from .base import BaseNNPipeline
 
 
 class RegressionPipeline(BaseNNPipeline):
-    """Pipeline for regression tasks."""
+    """Pipeline for regression tasks.
+
+    Parameters
+    ----------
+    scale_target : bool, default=True
+        Standardize target values to mean=0, std=1 during training.
+        Predictions are automatically unscaled. Improves neural net
+        convergence, especially for features with large numerical ranges.
+    """
+
+    def __init__(self, *args, scale_target: bool = True, **kwargs):
+        self.scale_target = scale_target
+        self._target_mean: Optional[torch.Tensor] = None
+        self._target_std: Optional[torch.Tensor] = None
+        super().__init__(*args, **kwargs)
 
     def _build_model(self, input_dim: int, output_dim: int) -> nn.Module:
         """Build a DANet module with a single-output linear layer."""
@@ -49,9 +64,22 @@ class RegressionPipeline(BaseNNPipeline):
         }
     
     def _prepare_target(self, df: pd.DataFrame) -> torch.Tensor:
-        """Convert target column to float tensor."""
+        """Convert target column to float tensor, optionally standardize."""
         target = super()._prepare_target(df)
-
-        # Ensure target is float and shape (n_sample, 1)
         target = target.view(-1, 1)
+
+        if self.scale_target:
+            self._target_mean = target.mean()
+            self._target_std = target.std() + 1e-8
+            target = (target - self._target_mean) / self._target_std
+
         return target
+    
+    def predict(self, df: pd.DataFrame) -> np.ndarray:
+        """Generate regression predictions (unscaled if target scaling is enabled)."""
+        preds = super().predict(df)
+        if self.scale_target and self._target_mean is not None:
+            mean = self._target_mean.cpu().numpy()
+            std = self._target_std.cpu().numpy()
+            return preds * std + mean
+        return preds
