@@ -22,54 +22,64 @@ def get_danet_param_grid(
     dict
         param_grid ready for HyperparameterTuner(..., param_grid=param_grid).
     """
-
-    # Ensure hidden_dims[0] is divisible by attention_heads
-    # We handle this in the pipeline by rounding or asserting,
-    # but here we restrict to safe values.
     safe_heads = [2, 4, 8] if input_dim >= 16 else [2, 4]
 
     if small_search:
         return {
-            # Architecture
-            "hidden_dims": [
-                [128, 64],
-                [256, 128, 64],
-            ],
-            "dropout": [0.1, 0.3, 0.5],
-            "attention_heads": safe_heads,
-            "use_sample_attention": [False, True],
+            "dropout": [0.1, 0.3],
+            "learning_rate": optuna.distributions.FloatDistribution(1e-4, 1e-2, log=True),
+            "weight_decay": optuna.distributions.FloatDistribution(1e-6, 1e-3, log=True),
+            "hidden_dims_choice": ["adaptive"],
+            "gating_type": ["soft", "none"],
         }
 
-    # ------------------------------------------------------------------
-    # Full search space — mix of discrete lists and Optuna distributions
-    # ------------------------------------------------------------------
     return {
-        # --- Architecture ---
-        # List of hidden layer widths. First element must be divisible by
-        # attention_heads (enforced in DANetModule via assert).
-        "hidden_dims": [
-            [128, 64],
-            [128, 64, 32],
-            [256, 128],
-            [256, 128, 64],
-            [256, 128, 64, 32],
-            [512, 256, 128],
-        ],
-
-        # --- Regularization ---
-        # Dropout rate — continuous search via uniform distribution
-        "dropout": optuna.distributions.FloatDistribution(0.0, 0.6),
-
-        # --- Attention ---
-        # Number of attention heads — must divide hidden_dims[0]
-        "attention_heads": safe_heads,
-
-        # Whether to use the optional sample-wise attention layer
-        "use_sample_attention": [False, True],
-
-        # --- Training hyperparameters (if your pipeline exposes them) ---
-        # Often pipelines also expose optimizer params — include if available:
-        # "learning_rate": optuna.distributions.FloatDistribution(1e-4, 1e-2, log=True),
-        # "batch_size": [32, 64, 128, 256],
-        # "weight_decay": optuna.distributions.FloatDistribution(1e-6, 1e-3, log=True),
+        "dropout": optuna.distributions.FloatDistribution(0.0, 0.5),
+        "learning_rate": optuna.distributions.FloatDistribution(1e-4, 1e-2, log=True),
+        "weight_decay": optuna.distributions.FloatDistribution(1e-6, 1e-3, log=True),
+        "hidden_dims_choice": ["adaptive", "narrow", "wide"],
+        "gating_type": ["soft", "none"],
     }
+
+
+def _compute_hidden_dims(n_features: int):
+    """Adaptive hidden layer dimensions (same as experiment runner)."""
+    h0 = max(32, min(n_features * 2, 128))
+    h0 = ((h0 + 3) // 4) * 4
+    h1 = max(16, min(n_features, 64))
+    h1 = ((h1 + 3) // 4) * 4
+    h2 = max(8, min(n_features // 2, 32))
+    h2 = ((h2 + 3) // 4) * 4
+    return [h0, h1, h2]
+
+
+def get_danet_param_mapper(params: dict, pipeline) -> dict:
+    """Map symbolic param names to pipeline constructor kwargs.
+
+    Translates "hidden_dims_choice" → actual "hidden_dims" list,
+    adds default values for gating_k, and preserves all other params.
+    """
+    n_feat = len(pipeline.numeric_features)
+    pipe_kwargs = dict(params)  # copy
+
+    # Map hidden_dims_choice → hidden_dims
+    choice = pipe_kwargs.pop("hidden_dims_choice", "adaptive")
+    if choice == "adaptive":
+        pipe_kwargs["hidden_dims"] = _compute_hidden_dims(n_feat)
+    elif choice == "narrow":
+        pipe_kwargs["hidden_dims"] = [32, 16, 8]
+    elif choice == "wide":
+        pipe_kwargs["hidden_dims"] = [256, 128, 64]
+
+    # Add required pipeline kwargs that aren't in the grid
+    pipe_kwargs.setdefault("numeric_features", pipeline.numeric_features)
+    pipe_kwargs.setdefault("categorical_features", pipeline.categorical_features)
+    pipe_kwargs.setdefault("target_column", pipeline.target_column)
+    pipe_kwargs.setdefault("gating_k", max(1, n_feat // 3))
+    pipe_kwargs.setdefault("batch_size", pipeline.batch_size)
+    pipe_kwargs.setdefault("epochs", 100)
+    pipe_kwargs.setdefault("early_stopping_patience", 15)
+    pipe_kwargs.setdefault("random_state", pipeline.random_state)
+    pipe_kwargs.setdefault("n_classes", getattr(pipeline, "n_classes", None))
+
+    return pipe_kwargs

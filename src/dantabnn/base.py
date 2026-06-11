@@ -6,10 +6,12 @@ from collections import OrderedDict
 from pathlib import Path
 from typing import List, Optional, Dict, Tuple, Union, Any, Callable
 
+import gc
 import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
+from scipy.sparse import issparse
 from sklearn.model_selection import BaseCrossValidator
 from torch.utils.data import DataLoader, TensorDataset
 
@@ -250,14 +252,15 @@ class BaseNNPipeline(ABC):
         else:
             categorical_encoded = categorical_data
 
-        # Step 5: Combine features
-        features = np.hstack([numeric_scaled, categorical_encoded]) if (
-                numeric_scaled.size > 0 or categorical_encoded.size > 0) else np.empty((len(df), 0))
+        # Step 5: Combine features (handle sparse categorical encoding)
+        cat_dense = categorical_encoded.toarray() if issparse(categorical_encoded) else categorical_encoded
+        features = np.hstack([numeric_scaled, cat_dense]) if (
+                numeric_scaled.size > 0 or cat_dense.size > 0) else np.empty((len(df), 0))
 
-        # Build feature names
+        # Build feature names (before memory cleanup — needs numeric_scaled.shape)
         if self.engineer_features and self.feature_engineer is not None:
             n_orig = len(self.numeric_features)
-            n_gen = numeric_scaled.shape[1] - n_orig if numeric_scaled.ndim > 1 else 0
+            n_gen = numeric_scaled.shape[1] - n_orig if hasattr(numeric_scaled, 'ndim') and numeric_scaled.ndim > 1 else 0
             gen_names = [f"gen_{i}" for i in range(n_gen)] if n_gen > 0 else []
             num_names = [f"num_{f}" for f in self.numeric_features] + gen_names
         else:
@@ -275,7 +278,14 @@ class BaseNNPipeline(ABC):
             cat_names = []
 
         features_names = num_names + cat_names
-        return torch.FloatTensor(features.astype(np.float32)).to(self.device), features_names
+
+        # Memory cleanup: free intermediate numpy arrays
+        del numeric_data, categorical_data, numeric_scaled, cat_dense
+        gc.collect()
+
+        # Convert to float32 for GPU transfer
+        features = features.astype(np.float32) if features.dtype == np.float64 else features
+        return torch.FloatTensor(features).to(self.device), features_names
 
     def _prepare_target(self, df: pd.DataFrame) -> torch.Tensor:
         """Ectract target column and convert to tensor."""
@@ -331,6 +341,17 @@ class BaseNNPipeline(ABC):
         input_dim = train_features.shape[1]
         output_dim = self._get_output_dim(train_target)
         logger.debug(f"Input dim: {input_dim}, output dim: {output_dim}")
+
+        # Validate input dimension (P1: prevent OOM on large feature sets)
+        if input_dim > 512:
+            raise ValueError(
+                f"Input dimension {input_dim} exceeds DANet limit of 512. "
+                f"Reduce feature set: disable engineer_features, "
+                f"reduce engineer_max_features, or use OrdinalEncoder instead of OneHot."
+            )
+        if input_dim > 256:
+            logger.warning(f"Large input dimension ({input_dim}). "
+                          f"Consider reducing features for speed and memory.")
 
         # Build model 
         self.model = self._build_model(input_dim, output_dim).to(self.device)
@@ -542,7 +563,7 @@ class BaseNNPipeline(ABC):
             The original instance remains unmodified.
         """
         from .tuning.hyperparam import HyperparameterTuner
-        from .tuning.tune_utils import get_danet_param_grid
+        from .tuning.tune_utils import get_danet_param_grid, get_danet_param_mapper
 
         # Auto-generate param_grid if not provided
         if param_grid is None:
@@ -575,6 +596,7 @@ class BaseNNPipeline(ABC):
             verbose=verbose,
             random_state=random_state,
             direction=direction,
+            param_mapper=get_danet_param_mapper,
             **tuner_kwargs,
         )
 

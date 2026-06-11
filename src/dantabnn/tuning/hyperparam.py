@@ -31,6 +31,14 @@ class HyperparameterTuner:
     Guarantees that ``df_train`` and ``df_val`` are never copied inside
     the objective function. Only integer index arrays and scalar
     parameters cross the trial boundary.
+
+    Parameters
+    ----------
+    param_mapper : callable, optional
+        Function that maps sampled params (dict) to pipeline constructor
+        kwargs. Useful when param_grid uses symbolic names (e.g.,
+        "hidden_dims_choice") that need translation to actual constructor
+        args (e.g., "hidden_dims").
     """
 
     def __init__(
@@ -46,6 +54,7 @@ class HyperparameterTuner:
         direction: str = "minimize",
         pruner: Optional[optuna.pruners.BasePruner] = None,
         study_name: Optional[str] = None,
+        param_mapper: Optional[callable] = None,
     ):
         self.pipeline = pipeline
         self.param_grid = param_grid
@@ -58,6 +67,7 @@ class HyperparameterTuner:
         self.direction = direction
         self.pruner = pruner
         self.study_name = study_name
+        self.param_mapper = param_mapper
 
         self.best_params_: Optional[Dict[str, Any]] = None
         self.best_score_: Optional[float] = None
@@ -125,16 +135,22 @@ class HyperparameterTuner:
     ) -> float:
         """Optuna objective. Only lightweight indices enter; no DataFrame copies."""
 
-        # 1. Sample hyperparameters (scalars only)
+        # 1. Sample hyperparameters
         params: Dict[str, Any] = {}
         for name, values in self.param_grid.items():
             params[name] = self._suggest_param(trial, name, values)
         trial.set_user_attr("params", params)
 
-        # 2. Fit & score — no concat, no copy, no reindex
+        # Apply param_mapper if provided (e.g., hidden_dims_choice → hidden_dims)
+        if self.param_mapper:
+            pipe_kwargs = self.param_mapper(params, self.pipeline)
+        else:
+            pipe_kwargs = params
+
+        # 2. Fit & score
         if df_val is not None:
             # ---- Hold-out mode: single fit on full train, evaluate on val ----
-            estimator = self.pipeline.__class__(**params)
+            estimator = self.pipeline.__class__(**pipe_kwargs)
             estimator.fit(df_train, df_val, verbose=0)
             score_val = estimator.evaluate(df_val)
             # Extract the first metric as the score
@@ -156,7 +172,7 @@ class HyperparameterTuner:
                 fold_train = df_train.iloc[train_idx]
                 fold_val = df_train.iloc[val_idx]
 
-                estimator = self.pipeline.__class__(**params)
+                estimator = self.pipeline.__class__(**pipe_kwargs)
                 estimator.fit(fold_train, fold_val, verbose=0)
                 fold_score_val = estimator.evaluate(fold_val)
                 if fold_score_val:
@@ -256,7 +272,8 @@ class HyperparameterTuner:
         self.best_score_ = -raw_best if self.direction == "maximize" else raw_best
 
         # Refit best estimator on full data
-        self.best_estimator_ = self.pipeline.__class__(**self.best_params_)
+        best_kwargs = self.param_mapper(self.best_params_, self.pipeline) if self.param_mapper else self.best_params_
+        self.best_estimator_ = self.pipeline.__class__(**best_kwargs)
         if df_val is not None:
             self.best_estimator_.fit(df_train, df_val, verbose=verbose)
         else:
