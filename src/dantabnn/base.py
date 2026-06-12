@@ -342,16 +342,25 @@ class BaseNNPipeline(ABC):
         output_dim = self._get_output_dim(train_target)
         logger.debug(f"Input dim: {input_dim}, output dim: {output_dim}")
 
-        # Validate input dimension (P1: prevent OOM on large feature sets)
-        if input_dim > 512:
-            raise ValueError(
-                f"Input dimension {input_dim} exceeds DANet limit of 512. "
-                f"Reduce feature set: disable engineer_features, "
-                f"reduce engineer_max_features, or use OrdinalEncoder instead of OneHot."
+        # Validate input dimension — warn on large feature sets to prevent OOM
+        if input_dim > 1024:
+            logger.error(
+                f"Input dimension {input_dim} is very large. "
+                f"Consider disabling engineer_features, reducing engineer_max_features "
+                f"(currently {self.engineer_max_features}), or using OrdinalEncoder "
+                f"instead of OneHot to reduce feature count and memory usage."
             )
-        if input_dim > 256:
-            logger.warning(f"Large input dimension ({input_dim}). "
-                          f"Consider reducing features for speed and memory.")
+        elif input_dim > 512:
+            logger.warning(
+                f"Input dimension {input_dim} is large. "
+                f"Attention complexity is O(D²) = {input_dim**2} per head. "
+                f"Consider reducing features if encountering memory issues."
+            )
+        elif input_dim > 256:
+            logger.info(
+                f"Input dimension {input_dim} — monitoring. "
+                f"Performance will degrade above ~1024."
+            )
 
         # Build model 
         self.model = self._build_model(input_dim, output_dim).to(self.device)

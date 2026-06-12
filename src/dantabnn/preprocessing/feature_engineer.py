@@ -97,11 +97,14 @@ class AutoFeatureEngineer:
         # Sort by skew magnitude descending
         log_candidates.sort(key=lambda x: x[1], reverse=True)
 
-        # Respect max_generated cap
+        # Respect max_generated cap — trim both square and log indices
         total_allowed = self.max_generated
         n_square = len(self._square_indices)
+        if n_square > total_allowed:
+            # Too many input features — trim square indices to max_generated
+            self._square_indices = self._square_indices[:total_allowed]
+            n_square = total_allowed
         if n_square + len(log_candidates) > total_allowed:
-            # Trim log candidates, keep highest skew
             available_log_slots = max(0, total_allowed - n_square)
             log_candidates = log_candidates[:available_log_slots]
 
