@@ -63,6 +63,7 @@ class BaseNNPipeline(ABC):
             impute_missing: bool = True,
             engineer_features: bool = True,
             engineer_max_features: int = 100,
+            preprocessing_mode: str = "auto",  # "auto", "full", "minimal"
 
             # Device
             device: Optional[str] = None,
@@ -106,6 +107,8 @@ class BaseNNPipeline(ABC):
         self.impute_missing = impute_missing
         self.engineer_features = engineer_features
         self.engineer_max_features = engineer_max_features
+        self.preprocessing_mode = preprocessing_mode
+        self._minimal_mode_applied = False
 
         # Device
         if device is None:
@@ -136,6 +139,34 @@ class BaseNNPipeline(ABC):
         np.random.seed(self.random_state)
         if self.device == "cuda":
             torch.cuda.manual_seed_all(self.random_state)
+
+    def _maybe_apply_minimal_mode(self, df_train: pd.DataFrame):
+        """Auto-detect whether to skip IQR clipping and feature engineering.
+
+        Triggered when dataset fingerprint suggests preprocessing will add
+        noise: small sample size, few features, no missing values, no
+        categorical columns. For clean medical/scientific datasets (e.g., Pima
+        diabetes, iris), these transformations overfit or cap real signal.
+        """
+        n_samples = len(df_train)
+        n_features = len(self.numeric_features)
+        has_categorical = bool(self.categorical_features)
+
+        numeric_data = df_train[self.numeric_features].values if self.numeric_features else np.empty((n_samples, 0))
+        has_missing = bool(np.isnan(numeric_data).any()) if numeric_data.size > 0 else False
+
+        if (n_samples < 1000 and n_features < 20 and not has_categorical and not has_missing):
+            self._apply_minimal_mode()
+            logger.info(
+                f"Minimal preprocessing auto-detected (n={n_samples}, d={n_features}, "
+                f"no categorical, no missing). Disabling IQR clipping and feature engineering."
+            )
+
+    def _apply_minimal_mode(self):
+        """Disable IQR clipping and feature engineering; keep only scaling + encoding."""
+        self.clip_outliers = False
+        self.engineer_features = False
+        self._minimal_mode_applied = True
 
     @abstractmethod
     def _build_model(self, input_dim: int, output_dim: int) -> nn.Module:
@@ -333,6 +364,12 @@ class BaseNNPipeline(ABC):
         logger.info("Starting pipline fitting...")
         self.feature_names = None
 
+        # Auto-detect whether to skip IQR + feature engineering
+        if self.preprocessing_mode == "auto":
+            self._maybe_apply_minimal_mode(df_train)
+        elif self.preprocessing_mode == "minimal":
+            self._apply_minimal_mode()
+
         # Prepare features and target for train, validation data 
         train_features, train_target, self.feature_names = self._prepare_data(df_train, fit=True)
         val_features, val_target, _ = self._prepare_data(df_val, fit=False) if df_val is not None else (None, None, None)
@@ -479,6 +516,9 @@ class BaseNNPipeline(ABC):
             for (batch_X,) in loader:
                 pred = self.model(batch_X)
                 predictions.append(pred.cpu().numpy())
+        # Free GPU memory after prediction
+        if self.device == "cuda" or (hasattr(torch.cuda, "is_available") and torch.cuda.is_available()):
+            torch.cuda.empty_cache()
         return np.vstack(predictions)   
 
     def evaluate(
@@ -517,7 +557,7 @@ class BaseNNPipeline(ABC):
             param_grid: Optional[Dict[str, List[Any]]] = None,
             df_val: Optional[pd.DataFrame] = None,
             cv: Union[int, BaseCrossValidator] = 5,
-            n_iter: Optional[int] = 50,
+            n_iter: Optional[int] = 500,
             scoring: str = "neg_mean_squared_error",
             direction: str = "minimize",
             random_state: Optional[int] = None,

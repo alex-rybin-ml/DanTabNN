@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 from typing import Dict, List, Any, Union, Optional, Tuple
 
+import math
 import numpy as np
 import optuna
 import pandas as pd
@@ -14,6 +15,55 @@ from ..utils.logger import setup_logger
 logger = setup_logger("HyperparametersTuner")
 
 optuna.logging.set_verbosity(optuna.logging.WARNING)
+
+
+class EarlyStoppingCallback:
+    """Stop the study when no improvement has occurred for N consecutive completed trials.
+
+    Parameters
+    ----------
+    early_stopping_rounds : int or None
+        Number of consecutive trials without improvement before stopping.
+        If None, defaults to ``max(10, n_trials // 5)`` (20% of total trials).
+    direction : {"maximize", "minimize"}
+        Optimization direction.
+    """
+
+    def __init__(self, early_stopping_rounds=None, direction="maximize"):
+        self._early_stopping_rounds = early_stopping_rounds
+        self.direction = direction
+        self.best_value = float("-inf") if direction == "maximize" else float("inf")
+        self.counter = 0
+        self._set_by_trials = False
+
+    def _maybe_set_rounds(self, n_trials):
+        """Auto-compute early_stopping_rounds as 20% of n_trials if not explicitly set."""
+        if self._early_stopping_rounds is None and not self._set_by_trials:
+            self._early_stopping_rounds = max(10, n_trials // 5)
+            self._set_by_trials = True
+
+    @property
+    def early_stopping_rounds(self):
+        return self._early_stopping_rounds or 10
+
+    def __call__(self, study, trial):
+        if trial.state != optuna.trial.TrialState.COMPLETE:
+            return
+
+        v = trial.value
+        if self.direction == "maximize":
+            if v > self.best_value:
+                self.best_value, self.counter = v, 0
+            else:
+                self.counter += 1
+        else:
+            if v < self.best_value:
+                self.best_value, self.counter = v, 0
+            else:
+                self.counter += 1
+
+        if self.counter >= self.early_stopping_rounds:
+            study.stop()
 
 
 @dataclass
@@ -54,6 +104,8 @@ class HyperparameterTuner:
         direction: str = "minimize",
         pruner: Optional[optuna.pruners.BasePruner] = None,
         study_name: Optional[str] = None,
+        timeout: Optional[float] = None,
+        early_stopping_rounds: Optional[int] = None,
         param_mapper: Optional[callable] = None,
     ):
         self.pipeline = pipeline
@@ -67,6 +119,8 @@ class HyperparameterTuner:
         self.direction = direction
         self.pruner = pruner
         self.study_name = study_name
+        self.timeout = timeout
+        self.early_stopping_rounds = early_stopping_rounds
         self.param_mapper = param_mapper
 
         self.best_params_: Optional[Dict[str, Any]] = None
@@ -228,8 +282,10 @@ class HyperparameterTuner:
                 for train_idx, val_idx in cv_splitter.split(df_train, y)
             ]
 
-        # Pruner
-        pruner = self.pruner if self.pruner is not None else optuna.pruners.MedianPruner()
+        # Pruner — default MedianPruner with robust startup for large trial counts
+        pruner = self.pruner if self.pruner is not None else optuna.pruners.MedianPruner(
+            n_startup_trials=10, n_warmup_steps=5,
+        )
 
         # Study
         sampler = optuna.samplers.TPESampler(seed=self.random_state)
@@ -245,13 +301,26 @@ class HyperparameterTuner:
             trial, df_train, df_val, cv_splits, y_col_idx
         )
 
+        # Early stopping callback — stops study when no improvement for N trials
+        early_stop = EarlyStoppingCallback(
+            early_stopping_rounds=self.early_stopping_rounds,
+            direction=self.direction,
+        )
+        early_stop._maybe_set_rounds(self.n_iter)
+
         # Optimize
         self.study_.optimize(
             objective,
             n_trials=self.n_iter,
             n_jobs=n_jobs,
+            timeout=self.timeout,
+            callbacks=[early_stop],
             show_progress_bar=show_progress_bar,
             catch=(Exception,),
+        )
+        logger.info(
+            f"Study stopped after {len(self.study_.trials)} trials "
+            f"(max {self.n_iter}). Early stopping rounds: {early_stop.early_stopping_rounds}."
         )
 
         # Results
