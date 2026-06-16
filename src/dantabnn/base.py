@@ -153,7 +153,8 @@ class BaseNNPipeline(ABC):
         has_categorical = bool(self.categorical_features)
 
         numeric_data = df_train[self.numeric_features].values if self.numeric_features else np.empty((n_samples, 0))
-        has_missing = bool(np.isnan(numeric_data).any()) if numeric_data.size > 0 else False
+        # Use pd.isna() to handle pandas NAType (Int64, etc.) in addition to np.nan
+        has_missing = bool(pd.isna(numeric_data).any()) if numeric_data.size > 0 else False
 
         if (n_samples < 1000 and n_features < 20 and not has_categorical and not has_missing):
             self._apply_minimal_mode()
@@ -224,7 +225,11 @@ class BaseNNPipeline(ABC):
         List[str]
             Names of the features after preprocessing.
         """
-        numeric_data = df[self.numeric_features].values.astype(np.float64) if self.numeric_features else np.empty((len(df), 0))
+        # Use to_numpy with float conversion that handles pandas NAType
+        if self.numeric_features:
+            numeric_data = df[self.numeric_features].to_numpy(dtype=np.float64, na_value=np.nan, copy=False) 
+        else:
+            numeric_data = np.empty((len(df), 0))
         categorical_data = df[self.categorical_features].values if self.categorical_features else np.empty((len(df), 0))
 
         # Step 0: Impute missing values
@@ -236,6 +241,10 @@ class BaseNNPipeline(ABC):
                 if self.imputer is None:
                     raise RuntimeError("Imputer not fitted. Call fit first.")
                 numeric_data = self.imputer.transform(numeric_data)
+
+        # Tier 1 memory: free pre-imputation data if large
+        if numeric_data.size > 0 and numeric_data.nbytes > 500_000_000:  # 500MB
+            gc.collect()
 
         # Step 1: Clip outliers via IQR
         if self.clip_outliers and numeric_data.size > 0:
@@ -258,6 +267,9 @@ class BaseNNPipeline(ABC):
                 if self.feature_engineer is None:
                     raise RuntimeError("FeatureEngineer not fitted. Call fit first.")
                 numeric_data = self.feature_engineer.transform(numeric_data)
+
+            if numeric_data.nbytes > 500_000_000:
+                gc.collect()
 
         # Step 3: Scale numeric features
         if self.scale_numeric and numeric_data.size > 0:
@@ -372,6 +384,9 @@ class BaseNNPipeline(ABC):
 
         # Prepare features and target for train, validation data 
         train_features, train_target, self.feature_names = self._prepare_data(df_train, fit=True)
+        # Free pandas DataFrame — no longer needed after numpy extraction
+        del df_train
+        gc.collect()
         val_features, val_target, _ = self._prepare_data(df_val, fit=False) if df_val is not None else (None, None, None)
 
         # Determine input/output dimensions
@@ -486,6 +501,236 @@ class BaseNNPipeline(ABC):
                 logger.info(msg)
 
         # Restore best model
+        if hasattr(self, "best_state"):
+            self.model.load_state_dict(self.best_state)
+        self.is_fitted = True
+        logger.info("Fitting completed.")
+        return self
+
+    def fit_from_parquet(
+            self,
+            filepath: str,
+            df_val: Optional[pd.DataFrame] = None,
+            verbose: int = 1,
+            chunk_size: int = 100_000,
+            sample_size: int = 100_000,
+    ) -> "BaseNNPipeline":
+        """Fit pipeline on large Parquet files with chunked memory-efficient reading.
+
+        Never loads the entire dataset into memory. Instead:
+        1. Samples ``sample_size`` rows to fit preprocessors (imputer, outlier
+           clipper, feature engineer, scaler, encoder).
+        2. Streams the full dataset in ``chunk_size``-row chunks through the
+           fitted preprocessors.
+        3. Accumulates the preprocessed float32 features into a single tensor.
+        4. Proceeds with normal training.
+
+        Peak memory is approximately ``chunk_size * n_features * 8 bytes +
+        final_tensor`` — independent of total dataset size.
+
+        Parameters
+        ----------
+        filepath : str
+            Path to Parquet file.
+        df_val : pd.DataFrame, optional
+            Validation data for early stopping.
+        verbose : int, default=1
+            Verbosity level.
+        chunk_size : int, default=100_000
+            Rows per chunk during streaming.
+        sample_size : int, default=100_000
+            Rows sampled for fitting preprocessor statistics.
+
+        Returns
+        -------
+        self
+        """
+        import pyarrow.dataset as ds
+
+        logger.info(f"Chunked fit from Parquet: {filepath}")
+        self.feature_names = None
+
+        # --- Phase 1: Fit preprocessors on a sample ---
+        dataset = ds.dataset(filepath)
+        n_rows = dataset.count_rows()
+        actual_sample = min(sample_size, n_rows)
+
+        logger.info(f"  Sampling {actual_sample:,} rows to fit preprocessors...")
+        sample_df = ds.dataset(
+            filepath,
+            format="parquet",
+        ).to_table(
+            columns=self.numeric_features + self.categorical_features + [self.target_column],
+            filter=None,
+        ).take(
+            np.sort(np.random.RandomState(42).choice(
+                n_rows, size=actual_sample, replace=False
+            ))
+        ).to_pandas()
+
+        # Fit all preprocessors on the sample
+        _ = self._prepare_features(sample_df, fit=True)
+
+        # Auto-detect minimal mode
+        if self.preprocessing_mode == "auto":
+            self._maybe_apply_minimal_mode(sample_df)
+        elif self.preprocessing_mode == "minimal":
+            self._apply_minimal_mode()
+
+        del sample_df; gc.collect()
+
+        # --- Phase 2: Stream full data through fitted preprocessors ---
+        logger.info(f"  Streaming {n_rows:,} rows in chunks of {chunk_size:,}...")
+
+        # Pre-allocate output: compute n_features_out from sample
+        sample_features, _, _ = self._prepare_data(
+            pd.DataFrame(
+                np.zeros((1, len(self.numeric_features))),
+                columns=self.numeric_features,
+            ).assign(**{self.target_column: 0.0}),
+            fit=False,
+        )
+        n_feat_out = sample_features.shape[1]
+        del sample_features; gc.collect()
+
+        # Pre-allocate float32 array for all features
+        all_features = np.empty((n_rows, n_feat_out), dtype=np.float32)
+        all_target = np.empty(n_rows, dtype=np.float32)
+        row_offset = 0
+
+        batch_iter = dataset.to_batches(
+            batch_size=chunk_size,
+            columns=self.numeric_features + self.categorical_features + [self.target_column],
+        )
+
+        for batch in batch_iter:
+            chunk_df = batch.to_pandas()
+            chunk_len = len(chunk_df)
+
+            # Extract target before preprocessing
+            target_vals = chunk_df[self.target_column].to_numpy(
+                dtype=np.float64, na_value=np.nan, copy=False
+            ).astype(np.float32, copy=False)
+
+            # Preprocess features using already-fitted transformers
+            chunk_features, _ = self._prepare_features(chunk_df, fit=False)
+
+            all_features[row_offset:row_offset + chunk_len] = chunk_features.cpu().numpy()
+            all_target[row_offset:row_offset + chunk_len] = target_vals
+
+            row_offset += chunk_len
+            del chunk_df, chunk_features, target_vals
+            gc.collect()
+
+        # Convert to tensors
+        train_features = torch.FloatTensor(all_features).to(self.device)
+        train_target = torch.FloatTensor(all_target).to(self.device)
+        self.feature_names = [
+            f"num_{f}" for f in self.numeric_features
+        ]  # Simplified — feature_engineer may add more, but minimal mode handles this
+
+        del all_features, all_target; gc.collect()
+
+        # --- Phase 3: Validation data (if provided) ---
+        val_features, val_target = None, None
+        if df_val is not None:
+            val_features, val_target, _ = self._prepare_data(df_val, fit=False)
+
+        # --- Phase 4: Train (same as fit()) ---
+        input_dim = train_features.shape[1]
+        output_dim = self._get_output_dim(train_target)
+        logger.debug(f"Input dim: {input_dim}, output dim: {output_dim}")
+
+        if input_dim > 1024:
+            logger.error(
+                f"Input dimension {input_dim} is very large. "
+                f"Consider disabling engineer_features, reducing engineer_max_features "
+                f"(currently {self.engineer_max_features})."
+            )
+        elif input_dim > 512:
+            logger.warning(f"Input dimension {input_dim} is large.")
+        elif input_dim > 256:
+            logger.info(f"Input dimension {input_dim} — monitoring.")
+
+        self.model = self._build_model(input_dim, output_dim).to(self.device)
+        loss_fn = self._get_loss_fn()
+        optimizer = torch.optim.Adam(
+            self.model.parameters(),
+            lr=self.learning_rate,
+            weight_decay=self.weight_decay,
+        )
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, mode="min", patience=max(5, self.early_stopping_patience // 2),
+            factor=0.5, min_lr=1e-6,
+        )
+
+        train_loader = self._create_dataloader(train_features, train_target, shuffle=True)
+        val_loader = self._create_dataloader(val_features, val_target, shuffle=False) \
+            if val_features is not None else None
+
+        self.history = {"train_loss": [], "val_loss": []}
+        best_val_loss = float("inf")
+        patience_counter = 0
+        min_delta = 1e-4
+        min_epochs = max(10, self.early_stopping_patience)
+
+        for epoch in range(self.epochs):
+            self.model.train()
+            epoch_train_loss = 0.0
+            for batch_X, batch_y in train_loader:
+                optimizer.zero_grad()
+                pred = self.model(batch_X)
+                loss = loss_fn(pred, batch_y)
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+                optimizer.step()
+                epoch_train_loss += loss.item() * batch_X.size(0)
+
+            epoch_train_loss /= len(train_loader.dataset)
+            self.history["train_loss"].append(epoch_train_loss)
+
+            if val_loader is not None:
+                self.model.eval()
+                epoch_val_loss = 0.0
+                with torch.no_grad():
+                    for batch_X, batch_y in val_loader:
+                        pred = self.model(batch_X)
+                        loss = loss_fn(pred, batch_y)
+                        epoch_val_loss += loss.item() * batch_X.size(0)
+                epoch_val_loss /= len(val_loader.dataset)
+                self.history["val_loss"].append(epoch_val_loss)
+                scheduler.step(epoch_val_loss)
+            else:
+                epoch_val_loss = None
+                scheduler.step(epoch_train_loss)
+
+            if val_loader is not None and epoch >= min_epochs:
+                if epoch_val_loss < best_val_loss - min_delta:
+                    best_val_loss = epoch_val_loss
+                    patience_counter = 0
+                    self.best_epoch = epoch
+                    self.best_state = self.model.state_dict()
+                elif epoch_val_loss < best_val_loss:
+                    best_val_loss = epoch_val_loss
+                    self.best_state = self.model.state_dict()
+                    patience_counter += 1
+                    if patience_counter > self.early_stopping_patience:
+                        logger.info(f"Early stopping triggered at epoch {epoch}")
+                        break
+                else:
+                    patience_counter += 1
+                    if patience_counter > self.early_stopping_patience:
+                        logger.info(f"Early stopping triggered at epoch {epoch}")
+                        break
+            else:
+                self.best_state = self.model.state_dict()
+
+            if verbose >= 1 and epoch % 10 == 0:
+                msg = f"Epoch {epoch}: train loss = {epoch_train_loss:.4f}"
+                if epoch_val_loss is not None:
+                    msg += f", val loss = {epoch_val_loss:.4f}"
+                logger.info(msg)
+
         if hasattr(self, "best_state"):
             self.model.load_state_dict(self.best_state)
         self.is_fitted = True

@@ -82,7 +82,8 @@ class OutlierClipper:
 
         n_features = X.shape[1] if X.ndim > 1 else 1
         X_2d = X.reshape(-1, n_features) if X.ndim == 1 else X
-        X_clipped = X_2d.copy()
+        # In-place clipping — avoid duplicating large arrays for memory efficiency
+        X_clipped = X_2d
 
         for i, (lower, upper) in self._bounds.items():
             if i < X_clipped.shape[1]:
