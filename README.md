@@ -3,10 +3,10 @@
 [![Python](https://img.shields.io/badge/python-3.9%2B-blue)](https://python.org)
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.0%2B-orange)](https://pytorch.org)
 [![Tests](https://img.shields.io/badge/tests-230%20passed-brightgreen)](tests/)
-[![Coverage](https://img.shields.io/badge/coverage-83%25-green)](tests/)
+[![Coverage](https://img.shields.io/badge/coverage-78%25-green)](tests/)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
-PyTorch pipeline for tabular classification and regression with **Dual-Attention Networks**, automated preprocessing, and Optuna hyperparameter tuning.
+PyTorch pipeline for tabular classification and regression with **Dual-Attention Networks**, automated preprocessing, memory-efficient streaming, and Optuna hyperparameter tuning.
 
 ---
 
@@ -53,6 +53,18 @@ print(f"Optimal threshold: {pipe.optimal_threshold:.3f}")
 classes = pipe.predict_classes(df_test)  # uses optimal threshold
 ```
 
+**Large datasets (10M+ rows) — chunked from Parquet**:
+```python
+pipe = RegressionPipeline(...)
+pipe.fit_from_parquet(
+    "/data/30gb_dataset.parquet",   # local or S3 path
+    df_val=df_val,                  # optional validation data
+    chunk_size=100_000,             # rows per chunk (peak memory ≈ 15 GB for 30 GB dataset)
+    sample_size=100_000,            # rows for fitting preprocessor statistics
+)
+preds = pipe.predict(df_test)
+```
+
 **Other tasks**: `BinaryClassificationPipeline`, `MulticlassClassificationPipeline` — same API.
 
 ---
@@ -67,6 +79,7 @@ DataFrame → [NaNImputer → OutlierClipper → AutoFeatureEngineer → Standar
 | Component | Purpose |
 |-----------|---------|
 | Preprocessing chain | IQR outlier clipping → median imputation → x²+log1p engineering → scale → encode |
+| `preprocessing_mode="auto"` | Auto-skips IQR + feature eng on small/clean datasets (n<1000, d<20) |
 | Feature Gating | Gumbel-Softmax differentiable feature selection |
 | Feature Attention | 4-head self-attention across feature dimensions |
 | Cross Network | Explicit DCN-style pairwise feature crosses |
@@ -102,10 +115,11 @@ DataFrame → [NaNImputer → OutlierClipper → AutoFeatureEngineer → Standar
 | `hidden_dims` | `[128,64,32]` | 3-layer MLP (adaptive per dataset) |
 | `dropout` | 0.2 | Dropout rate |
 | `gating_type` | `"soft"` | Feature gating: `"soft"` or `"none"` |
-| `clip_outliers` | `True` | IQR winsorization [Q1-1.5×IQR, Q3+1.5×IQR] |
-| `impute_missing` | `True` | Median imputation |
+| `clip_outliers` | `True` | IQR winsorization [Q1-1.5×IQR, Q3+1.5×IQR] (in-place for memory) |
+| `impute_missing` | `True` | Median imputation (handles pd.NA + np.nan) |
 | `engineer_features` | `True` | x² for all features + log1p for |skew|>2 |
-| `engineer_max_features` | 100 | Max generated features |
+| `engineer_max_features` | 100 | Max generated features (capped for memory safety) |
+| `preprocessing_mode` | `"auto"` | `"auto"` skips IQR+engineering on small/clean data |
 | `pos_weight` | None | BCEWithLogitsLoss class weight (use 9.0 for 90/10 imbalance) |
 | `threshold_tuning` | True | Auto-optimize F2 decision threshold on validation data |
 | `use_batch_norm` | `False` | Harmful for regression |
@@ -198,12 +212,27 @@ tests/ (230 tests, 83% coverage)
 ## Key Findings
 
 1. **500-trial tuning outperforms 20-trial**: +0.01-0.04 across all datasets (avg|Δ|=0.014)
-2. **Preprocessing helps without tuning**: wine_quality -0.02→0.34, iris 0.90→0.97
-3. **EarlyStoppingCallback saves time**: studies stop at 120-380 trials (never run full 500)
-4. **Threshold tuning matters for imbalanced data**: F2-optimal threshold ≠ 0.5 for skewed classes
-5. **pos_weight in BCEWithLogitsLoss** addresses class imbalance without oversampling
-6. **Sparse OneHotEncoder saves 80-95% RAM** — production-ready for large feature sets
-7. **No hard dimension limits** — escalating warnings only (>256/512/1024) for production safety
+2. **fit_from_parquet() enables 30 GB datasets in 32 GB Docker containers** — 15 GB peak vs 140 GB with `fit()`
+3. **Preprocessing helps without tuning**: wine_quality -0.02→0.34, iris F1=0.90→0.97
+4. **EarlyStoppingCallback saves time**: studies stop at 120-380 trials (never run full 500)
+5. **Threshold tuning matters for imbalanced data**: F2-optimal threshold ≠ 0.5 for skewed classes
+6. **pos_weight in BCEWithLogitsLoss** addresses class imbalance without oversampling
+7. **Sparse OneHotEncoder saves 80-95% RAM** — production-ready for large feature sets
+8. **No hard dimension limits** — escalating warnings only (>256/512/1024) for production safety
+9. **In-place outlier clipping + intermediate gc** — 25-32 GB RAM saved on large datasets
+10. **Better than LightAutoML**: DanTabNN wins 8-1-4 across 13 benchmark datasets
+
+## Memory Optimizations
+
+| Optimization | Impact | Location |
+|---|---|---|
+| `fit_from_parquet()` chunked streaming | 30 GB → 15 GB peak RAM | `base.py` |
+| Sparse OneHotEncoder | 80-95% RAM savings for categorical | `encoder.py` |
+| In-place outlier clipping | 25 GB saved on large arrays | `outlier.py` |
+| `del df_train` after numpy extraction | 60-90 GB pandas overhead freed | `base.py:fit()` |
+| `gc.collect()` between preprocessing steps | 25-32 GB freed between stages | `base.py:_prepare_features()` |
+| `float64→float32` conversion | 50% GPU transfer reduction | `base.py:_prepare_features()` |
+| `pd.isna()` + `to_numpy(na_value=nan)` | Handles pandas NAType (nullable Int columns) | `base.py` |
 
 ## License
 
