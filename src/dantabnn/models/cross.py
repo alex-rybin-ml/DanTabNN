@@ -11,6 +11,25 @@ import torch
 import torch.nn as nn
 
 
+
+
+class CrossLayerV2(nn.Module):
+    """DCN-V2 cross layer with full matrix W: x_out = x0 * (W @ x + b) + x.
+
+    More expressive than DCN-V1 (which uses element-wise w*x).
+    From: Wang et al., DCN V2: Improved Deep & Cross Network (2020).
+    """
+
+    def __init__(self, input_dim: int):
+        super().__init__()
+        self.W = nn.Linear(input_dim, input_dim, bias=True)
+        nn.init.xavier_uniform_(self.W.weight, gain=0.1)
+        nn.init.zeros_(self.W.bias)
+
+    def forward(self, x0: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
+        projected = self.W(x)
+        crossed = x0 * projected
+        return crossed + x
 class CrossNetwork(nn.Module):
     """Cross Network for explicit feature crosses.
 
@@ -35,22 +54,27 @@ class CrossNetwork(nn.Module):
             low_rank: bool = False,
             rank_ratio: float = 0.5,
             dropout: float = 0.0,
+            interaction_type: str = "cross",
     ):
         super().__init__()
         self.input_dim = input_dim
         self.num_layers = num_layers
         self.low_rank = low_rank
+        self.interaction_type = interaction_type
         self.dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
 
         # Store layers
+
+
         self.cross_layers = nn.ModuleList()
         for i in range(num_layers):
-            if low_rank:
+            if interaction_type == "dcnv2":
+                self.cross_layers.append(CrossLayerV2(input_dim))
+            elif low_rank:
                 rank = max(1, int(input_dim * rank_ratio))
-                layer = FactorizedCrossLayer(input_dim, rank)
+                self.cross_layers.append(FactorizedCrossLayer(input_dim, rank))
             else:
-                layer = CrossLayer(input_dim)
-            self.cross_layers.append(layer)
+                self.cross_layers.append(CrossLayer(input_dim))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Apply cross network.

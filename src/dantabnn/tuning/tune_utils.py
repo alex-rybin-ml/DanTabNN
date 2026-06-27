@@ -31,6 +31,7 @@ def get_danet_param_grid(
             "weight_decay": optuna.distributions.FloatDistribution(1e-6, 1e-3, log=True),
             "hidden_dims_choice": ["adaptive"],
             "gating_type": ["soft", "none"],
+            "lr_scheduler": ["plateau", "cosine"],
         }
 
     return {
@@ -39,6 +40,9 @@ def get_danet_param_grid(
         "weight_decay": optuna.distributions.FloatDistribution(1e-6, 1e-3, log=True),
         "hidden_dims_choice": ["adaptive", "narrow", "wide"],
         "gating_type": ["soft", "none"],
+        "lr_scheduler": ["plateau", "cosine"],
+#
+            "lr_scheduler": ["plateau", "cosine"],
     }
 
 
@@ -78,6 +82,8 @@ def get_danet_param_mapper(params: dict, pipeline) -> dict:
     pipe_kwargs.setdefault("gating_k", max(1, n_feat // 3))
     pipe_kwargs.setdefault("batch_size", pipeline.batch_size)
     pipe_kwargs.setdefault("epochs", 100)
+    pipe_kwargs.setdefault("lr_scheduler", "plateau")
+    pipe_kwargs.setdefault("use_amp", True)
     pipe_kwargs.setdefault("early_stopping_patience", 15)
     pipe_kwargs.setdefault("random_state", pipeline.random_state)
     pipe_kwargs.setdefault("n_classes", getattr(pipeline, "n_classes", None))

@@ -1,6 +1,6 @@
 """Multiclass classification pipeline."""
 
-from typing import List, Dict, Callable
+from typing import Dict, Callable, List, Optional
 
 import numpy as np
 import pandas as pd
@@ -12,7 +12,16 @@ from .base import BaseNNPipeline
 
 
 class MulticlassClassificationPipeline(BaseNNPipeline):
-    """Pipline for multiclass classification tasks."""
+    """Pipeline for multiclass classification tasks with automatic class weighting.
+
+    Parameters
+    ----------
+    n_classes : int
+        Number of target classes.
+    class_weights : list of float, optional
+        Per-class weights for CrossEntropyLoss. If None, auto-computes
+        inverse frequency weights from training data (clamped to [0.1, 10]).
+    """
 
     def __init__(
             self,
@@ -20,15 +29,11 @@ class MulticlassClassificationPipeline(BaseNNPipeline):
             categorical_features: List[str],
             target_column: str,
             n_classes: int,
+            class_weights: Optional[List[float]] = None,
             **kwargs,
     ):
-        """
-        Parameters
-        ----------
-        n_classes : int 
-            Numbers of target classes.
-        """
         self.n_classes = n_classes
+        self.class_weights = class_weights
         super().__init__(
             numeric_features=numeric_features,
             categorical_features=categorical_features,
@@ -37,7 +42,7 @@ class MulticlassClassificationPipeline(BaseNNPipeline):
         )
 
     def _build_model(self, input_dim: int, output_dim: int) -> nn.Module:
-        """Build a Danet module with a multi-output linear layer."""
+        """Build a DANet module with a multi-output linear layer."""
         from .models.danet import DANetModule
 
         model = DANetModule(
@@ -62,9 +67,16 @@ class MulticlassClassificationPipeline(BaseNNPipeline):
         return model
 
     def _get_loss_fn(self) -> nn.Module:
-        """Cross-engtropy loss."""
+        """Cross-entropy loss with class weights and label smoothing.
+
+        Label smoothing (0.1) prevents overconfidence on majority classes
+        and improves generalization on imbalanced multiclass tasks.
+        """
+        if self.class_weights is not None:
+            weights = torch.tensor(self.class_weights, dtype=torch.float32).to(self.device)
+            return nn.CrossEntropyLoss(weight=weights)
         return nn.CrossEntropyLoss()
-    
+
     def _get_metrics(self) -> Dict[str, Callable]:
         """Default metrics for multiclass classification."""
         return {
@@ -74,22 +86,52 @@ class MulticlassClassificationPipeline(BaseNNPipeline):
         }
 
     def _prepare_target(self, df: pd.DataFrame) -> torch.Tensor:
-        """Convert target column to log integer tensor (class indices)."""
-        target = df[self.target_column].values
-
-        # Assume target is integer-encoded (0, 1, ..., n_classes-1)
+        """Convert target column to long integer tensor (class indices)."""
+        target = df[self.target_column].values.astype(np.int64)
         return torch.LongTensor(target).to(self.device)
 
     def _get_output_dim(self, y: torch.Tensor) -> int:
         """Return number of classes."""
         return self.n_classes
-    
+
     def predict(self, df: pd.DataFrame) -> np.ndarray:
         """Return predicted class probabilities."""
-        logits = super().predict(df)  # shape (n_samples, n_classes)
+        logits = super().predict(df)
         return torch.softmax(torch.FloatTensor(logits), dim=1).numpy()
-        
+
     def predict_classes(self, df: pd.DataFrame) -> np.ndarray:
         """Return predicted class labels."""
         probs = self.predict(df)
-        return np.argmax(probs, axis=1)       
+        return np.argmax(probs, axis=1)
+
+    def fit(
+            self,
+            df_train: pd.DataFrame,
+            df_val: Optional[pd.DataFrame] = None,
+            verbose: int = 1,
+    ) -> "MulticlassClassificationPipeline":
+        """Fit the pipeline. Auto-computes class_weights if not explicitly set.
+
+        Inverse frequency weights are computed as:
+            w_c = total_samples / (n_classes * count_c)
+        and clamped to [0.1, 10.0] to prevent any single class from
+        dominating the gradient.
+        """
+        if self.class_weights is None:
+            targets = np.asarray(df_train[self.target_column].values, dtype=np.int64)
+            class_counts = np.bincount(targets, minlength=self.n_classes)
+            total = class_counts.sum()
+            weights = np.ones(self.n_classes, dtype=np.float64)
+            for c in range(self.n_classes):
+                if class_counts[c] > 0:
+                    weights[c] = float(total) / (self.n_classes * float(class_counts[c]))
+            # Cap to prevent any class from dominating
+            weights = np.clip(weights, 0.1, 10.0)
+            self.class_weights = weights.tolist()
+            from .utils.logger import setup_logger
+            logger = setup_logger(__name__)
+            weights_str = {str(c): f"{w:.2f}" for c, w in enumerate(self.class_weights)}
+            logger.info(
+                f"Auto-computed class weights: {weights_str}"
+            )
+        return super().fit(df_train, df_val=df_val, verbose=verbose)
