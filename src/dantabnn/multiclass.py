@@ -135,3 +135,14 @@ class MulticlassClassificationPipeline(BaseNNPipeline):
                 f"Auto-computed class weights: {weights_str}"
             )
         return super().fit(df_train, df_val=df_val, verbose=verbose)
+
+    def _val_metric_name(self) -> str:
+        return "F1-macro"
+
+    def _compute_val_metric(self, y_true: torch.Tensor, y_pred: torch.Tensor) -> float:
+        yt = y_true.cpu().numpy().ravel()
+        yp = y_pred.argmax(dim=1).cpu().numpy().ravel()
+        try:
+            return float(f1_score(yt, yp, average="macro"))
+        except ValueError:
+            return 0.0

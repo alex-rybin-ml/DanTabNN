@@ -34,7 +34,7 @@ class BaseNNPipeline(ABC):
             categorical_features: List[str],
             target_column: str,
 
-            # Model architecture — wider 3-layer default from v2-baseline experiments
+            # Model architecture â€” wider 3-layer default from v2-baseline experiments
             hidden_dims: List[int] = [128, 64, 32],
             dropout: float = 0.2,
             attention_heads: int = 4,
@@ -208,6 +208,14 @@ class BaseNNPipeline(ABC):
         """Return a dictionary of metric functions (name -> callable)."""
         pass
 
+    def _val_metric_name(self) -> str:
+        """Return the name of the primary validation metric (e.g. 'ROC-AUC', 'R²', 'F1-macro')."""
+        return "loss"
+
+    def _compute_val_metric(self, y_true: torch.Tensor, y_pred: torch.Tensor) -> float:
+        """Compute the primary validation metric from raw tensors. Override in subclasses."""
+        return 0.0
+
     def _prepare_features(
             self, df: pd.DataFrame, fit: bool = False
     ) -> Tuple[torch.Tensor, List[str]]:
@@ -216,7 +224,7 @@ class BaseNNPipeline(ABC):
         Pipeline:
         1. Impute missing values (if enabled)
         2. Clip outliers via IQR (if enabled)
-        3. Engineer features — x² + log1p auto-detection (if enabled)
+        3. Engineer features â€” xÂ² + log1p auto-detection (if enabled)
         4. Scale numeric
         5. Encode categorical
         6. Combine into single tensor
@@ -266,7 +274,7 @@ class BaseNNPipeline(ABC):
                     raise RuntimeError("OutlierClipper not fitted. Call fit first.")
                 numeric_data = self.outlier_clipper.transform(numeric_data)
 
-        # Step 2: Engineer features (x² + log1p auto-detection)
+        # Step 2: Engineer features (xÂ² + log1p auto-detection)
         if self.engineer_features and numeric_data.size > 0:
             if fit:
                 self.feature_engineer = AutoFeatureEngineer(
@@ -310,7 +318,7 @@ class BaseNNPipeline(ABC):
         features = np.hstack([numeric_scaled, cat_dense]) if (
                 numeric_scaled.size > 0 or cat_dense.size > 0) else np.empty((len(df), 0))
 
-        # Build feature names (before memory cleanup — needs numeric_scaled.shape)
+        # Build feature names (before memory cleanup â€” needs numeric_scaled.shape)
         if self.engineer_features and self.feature_engineer is not None:
             n_orig = len(self.numeric_features)
             n_gen = numeric_scaled.shape[1] - n_orig if hasattr(numeric_scaled, 'ndim') and numeric_scaled.ndim > 1 else 0
@@ -445,7 +453,7 @@ class BaseNNPipeline(ABC):
 
         # Prepare features and target for train, validation data 
         train_features, train_target, self.feature_names = self._prepare_data(df_train, fit=True)
-        # Free pandas DataFrame — no longer needed after numpy extraction
+        # Free pandas DataFrame â€” no longer needed after numpy extraction
         del df_train
         gc.collect()
         val_features, val_target, _ = self._prepare_data(df_val, fit=False) if df_val is not None else (None, None, None)
@@ -455,7 +463,7 @@ class BaseNNPipeline(ABC):
         output_dim = self._get_output_dim(train_target)
         logger.debug(f"Input dim: {input_dim}, output dim: {output_dim}")
 
-        # Validate input dimension — warn on large feature sets to prevent OOM
+        # Validate input dimension â€” warn on large feature sets to prevent OOM
         if input_dim > 1024:
             logger.error(
                 f"Input dimension {input_dim} is very large. "
@@ -466,12 +474,12 @@ class BaseNNPipeline(ABC):
         elif input_dim > 512:
             logger.warning(
                 f"Input dimension {input_dim} is large. "
-                f"Attention complexity is O(D²) = {input_dim**2} per head. "
+                f"Attention complexity is O(DÂ²) = {input_dim**2} per head. "
                 f"Consider reducing features if encountering memory issues."
             )
         elif input_dim > 256:
             logger.info(
-                f"Input dimension {input_dim} — monitoring. "
+                f"Input dimension {input_dim} â€” monitoring. "
                 f"Performance will degrade above ~1024."
             )
 
@@ -480,7 +488,7 @@ class BaseNNPipeline(ABC):
         self.model, optimizer, scheduler, use_amp, scaler = self._configure_training(input_dim, output_dim)
         loss_fn = self._get_loss_fn()
 
-        # OLD DEAD CODE disabled: — using _configure_training above instead
+        # OLD DEAD CODE disabled: â€” using _configure_training above instead
         # Build model 
         self.model = self._build_model(input_dim, output_dim).to(self.device)
         loss_fn = self._get_loss_fn()
@@ -532,8 +540,8 @@ class BaseNNPipeline(ABC):
                     batch_X, batch_y, self.model, optimizer, loss_fn, use_amp, scaler
                 )
             if True:
-                pass  # makes else below match if, not for — dead branch
-            # (old training loop removed � using _train_step above)
+                pass  # makes else below match if, not for â€” dead branch
+            # (old training loop removed — using _train_step above)
 
             epoch_train_loss /= len(train_loader.dataset)
             self.history["train_loss"].append(epoch_train_loss)
@@ -543,10 +551,13 @@ class BaseNNPipeline(ABC):
                 self.model.eval()
                 epoch_val_loss = 0.0
                 with torch.no_grad():
+                    all_val_preds, all_val_targets = [], []
                     for batch_X, batch_y in val_loader:
                         pred = self.model(batch_X)
                         loss = loss_fn(pred, batch_y)
                         epoch_val_loss += loss.item() * batch_X.size(0)
+                        all_val_preds.append(pred)
+                        all_val_targets.append(batch_y)
                 epoch_val_loss /= len(val_loader.dataset)
                 if self.lr_scheduler == "cosine":
                     scheduler.step()
@@ -554,13 +565,13 @@ class BaseNNPipeline(ABC):
                     scheduler.step(epoch_val_loss)
                 self.history["val_loss"].append(epoch_val_loss)
                 if False:
-                    pass  # dead — scheduler already stepped above
+                    pass  # dead â€” scheduler already stepped above
                 scheduler.step(epoch_val_loss)
             else:
                 epoch_val_loss = None
                 # (cosine scheduler already stepped)
 
-            # Early stopping — requires minimum epochs + meaningful improvement
+            # Early stopping â€” requires minimum epochs + meaningful improvement
             if val_loader is not None and epoch >= min_epochs:
                 if epoch_val_loss < best_val_loss - min_delta:
                     best_val_loss = epoch_val_loss
@@ -568,7 +579,7 @@ class BaseNNPipeline(ABC):
                     self.best_epoch = epoch
                     self.best_state = self.model.state_dict()
                 elif epoch_val_loss < best_val_loss:
-                    # Marginal improvement (< min_delta) — update best but also count patience
+                    # Marginal improvement (< min_delta) â€” update best but also count patience
                     best_val_loss = epoch_val_loss
                     self.best_state = self.model.state_dict()
                     patience_counter += 1
@@ -584,10 +595,17 @@ class BaseNNPipeline(ABC):
             else:
                 self.best_state = self.model.state_dict()
             
-            if verbose >= 1 and epoch % 10 == 0:
-                msg = f"Epoch {epoch}: train loss = {epoch_train_loss:.4f}"
+            if verbose >= 1 and epoch % 3 == 0:
+                msg = f"Epoch {epoch:3d}: train_loss={epoch_train_loss:.4f}"
                 if epoch_val_loss is not None:
-                    msg += f", val loss = {epoch_val_loss:.4f}"
+                    msg += f", val_loss={epoch_val_loss:.4f}"
+                # Compute per-epoch task metric (e.g. R², ROC-AUC, F1)
+                if val_loader is not None and epoch_val_loss is not None:
+                    metric_name = self._val_metric_name()
+                    val_preds_cat = torch.cat(all_val_preds, dim=0)
+                    val_targets_cat = torch.cat(all_val_targets, dim=0)
+                    metric_val = self._compute_val_metric(val_targets_cat, val_preds_cat)
+                    msg += f", val_{metric_name}={metric_val:.4f}"
                 logger.info(msg)
 
         # Restore best model
@@ -616,7 +634,7 @@ class BaseNNPipeline(ABC):
         4. Proceeds with normal training.
 
         Peak memory is approximately ``chunk_size * n_features * 8 bytes +
-        final_tensor`` — independent of total dataset size.
+        final_tensor`` â€” independent of total dataset size.
 
         Parameters
         ----------
@@ -717,7 +735,7 @@ class BaseNNPipeline(ABC):
         train_target = torch.FloatTensor(all_target).to(self.device)
         self.feature_names = [
             f"num_{f}" for f in self.numeric_features
-        ]  # Simplified — feature_engineer may add more, but minimal mode handles this
+        ]  # Simplified â€” feature_engineer may add more, but minimal mode handles this
 
         del all_features, all_target; gc.collect()
 
@@ -740,7 +758,7 @@ class BaseNNPipeline(ABC):
         elif input_dim > 512:
             logger.warning(f"Input dimension {input_dim} is large.")
         elif input_dim > 256:
-            logger.info(f"Input dimension {input_dim} — monitoring.")
+            logger.info(f"Input dimension {input_dim} â€” monitoring.")
 
         self.model = self._build_model(input_dim, output_dim).to(self.device)
         loss_fn = self._get_loss_fn()
@@ -819,10 +837,10 @@ class BaseNNPipeline(ABC):
             else:
                 self.best_state = self.model.state_dict()
 
-            if verbose >= 1 and epoch % 10 == 0:
-                msg = f"Epoch {epoch}: train loss = {epoch_train_loss:.4f}"
+            if verbose >= 1 and epoch % 3 == 0:
+                msg = f"Epoch {epoch:3d}: train_loss={epoch_train_loss:.4f}"
                 if epoch_val_loss is not None:
-                    msg += f", val loss = {epoch_val_loss:.4f}"
+                    msg += f", val_loss={epoch_val_loss:.4f}"
                 logger.info(msg)
 
         if hasattr(self, "best_state"):
@@ -1067,7 +1085,7 @@ class BaseNNPipeline(ABC):
         if engineer_path.exists():
             self.feature_engineer = joblib.load(engineer_path)
 
-        # Rebuild Model — compute input_dim from feature counts
+        # Rebuild Model â€” compute input_dim from feature counts
         num_features = len(self.numeric_features)
         if self.engineer_features and self.feature_engineer is not None:
             num_features = self.feature_engineer.n_features_out

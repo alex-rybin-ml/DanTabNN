@@ -51,14 +51,30 @@ class BinaryClassificationPipeline(BaseNNPipeline):
             use_batch_norm=self.use_batch_norm,
         )
 
-        # Output layer: single logit
-        model.set_output_layer(nn.Linear(self.hidden_dims[-1] if self.hidden_dims else input_dim, 1))
+        # Output layer: single logit, init bias for class imbalance
+        output_dim = self.hidden_dims[-1] if self.hidden_dims else input_dim
+        output_layer = nn.Linear(output_dim, 1)
+        # Initialize bias to log(prior) for imbalanced datasets to prevent BCE explosion
+        if self.pos_weight is not None and self.pos_weight > 1.0:
+            with torch.no_grad():
+                output_layer.bias.data.fill_(float(np.log(1.0 / self.pos_weight)))
+        model.set_output_layer(output_layer)
         return model
     
     def _get_loss_fn(self) -> nn.Module:
-        """Binary cross-entropy loss with optional class weighting."""
+        """Binary cross-entropy loss with optional class weighting.
+
+        pos_weight > 3.0 causes BCE gradient explosion on CPU due to
+        unbounded attention logits multiplied by large class weight.
+        Cap at 3.0 to ensure stability across all imbalance ratios.
+        """
         if self.pos_weight is not None:
-            weight = torch.tensor([self.pos_weight], device=self.device)
+            capped = min(float(self.pos_weight), 3.0)
+            if capped < self.pos_weight:
+                from .utils.logger import setup_logger
+                _lgr = setup_logger(__name__)
+                _lgr.warning(f"Capping pos_weight {self.pos_weight:.1f} → {capped:.1f} to prevent BCE explosion")
+            weight = torch.tensor([capped], device=self.device)
             return nn.BCEWithLogitsLoss(pos_weight=weight)
         return nn.BCEWithLogitsLoss()
     
@@ -134,3 +150,14 @@ class BinaryClassificationPipeline(BaseNNPipeline):
     def optimal_threshold(self) -> float:
         """Return the fitted optimal decision threshold."""
         return getattr(self, '_optimal_threshold', 0.5)
+
+    def _val_metric_name(self) -> str:
+        return "ROC-AUC"
+
+    def _compute_val_metric(self, y_true: torch.Tensor, y_pred: torch.Tensor) -> float:
+        yt = y_true.cpu().numpy().ravel()
+        yp = torch.sigmoid(y_pred).cpu().numpy().ravel()
+        try:
+            return float(roc_auc_score(yt, yp))
+        except ValueError:
+            return 0.0

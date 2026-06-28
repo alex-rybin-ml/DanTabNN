@@ -15,3 +15,4 @@ mlflow.db
 .coverage
 coverage.xml
 experiments
+artefacts/

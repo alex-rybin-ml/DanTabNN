@@ -83,3 +83,19 @@ class RegressionPipeline(BaseNNPipeline):
             std = self._target_std.cpu().numpy()
             return preds * std + mean
         return preds
+
+    def _val_metric_name(self) -> str:
+        return "R²"
+
+    def _compute_val_metric(self, y_true: torch.Tensor, y_pred: torch.Tensor) -> float:
+        yt = y_true.cpu().numpy().ravel()
+        yp = y_pred.cpu().numpy().ravel()
+        if self.scale_target and self._target_mean is not None:
+            mean = self._target_mean.cpu().numpy()
+            std = self._target_std.cpu().numpy()
+            yt = yt * std + mean
+            yp = yp * std + mean
+        try:
+            return float(r2_score(yt, yp))
+        except ValueError:
+            return 0.0
