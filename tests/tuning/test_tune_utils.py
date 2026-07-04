@@ -1,6 +1,6 @@
 """Tests for tuning/tune_utils.py and tune_utils mapper."""
 import optuna
-from dantabnn.tuning.tune_utils import get_danet_param_grid, get_danet_param_mapper, _compute_hidden_dims
+from dantabnn.tuning.tune_utils import get_danet_param_grid, get_danet_param_mapper
 from dantabnn.binary import BinaryClassificationPipeline
 
 
@@ -44,8 +44,8 @@ class TestParamMapper:
         )
         params = {"hidden_dims_choice": "adaptive", "dropout": 0.3, "gating_type": "soft"}
         result = get_danet_param_mapper(params, pipe)
-        assert "hidden_dims" in result
-        assert result["hidden_dims"] == _compute_hidden_dims(10)
+        # "adaptive" omits hidden_dims — pipeline auto-computes from n_features
+        assert "hidden_dims" not in result
         assert result["dropout"] == 0.3
 
     def test_narrow_choice(self):

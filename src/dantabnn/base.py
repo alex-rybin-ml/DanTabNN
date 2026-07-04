@@ -35,13 +35,13 @@ class BaseNNPipeline(ABC):
             target_column: str,
 
             # Model architecture â€” wider 3-layer default from v2-baseline experiments
-            hidden_dims: List[int] = [128, 64, 32],
+            hidden_dims: Optional[List[int]] = None,
             dropout: float = 0.2,
             attention_heads: int = 4,
 
             # Feature gating (differentiable feature selection)
             gating_type: str = 'soft',
-            gating_k: int = 10,
+            gating_k: Optional[int] = None,
             gating_temperature: float = 1.0,
             gating_hard: bool = True,
             gating_dropout: float = 0.0,
@@ -88,6 +88,12 @@ class BaseNNPipeline(ABC):
         # Feature gating
         self.gating_type = gating_type
         self.gating_k = gating_k
+
+        # Auto-compute architecture defaults from n_features when not provided
+        if self.hidden_dims is None:
+            self.hidden_dims = self._default_hidden_dims()
+        if self.gating_k is None:
+            self.gating_k = self._default_gating_k()
         self.gating_temperature = gating_temperature
         self.gating_hard = gating_hard
         self.gating_dropout = gating_dropout
@@ -149,6 +155,28 @@ class BaseNNPipeline(ABC):
             torch.backends.cudnn.benchmark = False
         # Optuna sampler is seeded per-study in hyperparam.py
         # Python's random is seeded here for any random-based ops
+
+    def _default_hidden_dims(self) -> List[int]:
+        """Compute default hidden layer dimensions from numeric feature count.
+        
+        Returns a 3-layer architecture aligned to attention_heads=4:
+        [h0, h1, h2] where h0 <= 128, h1 <= 64, h2 <= 32.
+        """
+        n_features = len(self.numeric_features)
+        h0 = max(32, min(n_features * 2, 128))
+        h0 = ((h0 + 3) // 4) * 4  # align to attention_heads=4
+        h1 = max(16, min(n_features, 64))
+        h1 = ((h1 + 3) // 4) * 4
+        h2 = max(8, min(n_features // 2, 32))
+        h2 = ((h2 + 3) // 4) * 4
+        return [h0, h1, h2]
+
+    def _default_gating_k(self) -> int:
+        """Compute default gating_k from numeric feature count.
+        
+        Returns max(1, n_numeric_features // 3).
+        """
+        return max(1, len(self.numeric_features) // 3)
 
     def _maybe_apply_minimal_mode(self, df_train: pd.DataFrame):
         """Auto-detect whether to skip IQR clipping and feature engineering.

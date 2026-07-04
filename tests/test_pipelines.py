@@ -95,7 +95,7 @@ class TestBaseNNPipeline:
         assert pipe.numeric_features == ["a", "b"]
         assert pipe.categorical_features == ["c"]
         assert pipe.target_column == "y"
-        assert pipe.hidden_dims == [128, 64, 32]
+        assert pipe.hidden_dims == [32, 16, 8]  # auto-computed from 2 numeric features
         assert pipe.dropout == 0.2
         assert pipe.batch_size == 32
         assert pipe.epochs == 100

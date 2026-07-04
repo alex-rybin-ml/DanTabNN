@@ -41,51 +41,38 @@ def get_danet_param_grid(
         "hidden_dims_choice": ["adaptive", "narrow", "wide"],
         "gating_type": ["soft", "none"],
         "lr_scheduler": ["plateau", "cosine"],
-#
-            "lr_scheduler": ["plateau", "cosine"],
     }
-
-
-def _compute_hidden_dims(n_features: int):
-    """Adaptive hidden layer dimensions (same as experiment runner)."""
-    h0 = max(32, min(n_features * 2, 128))
-    h0 = ((h0 + 3) // 4) * 4
-    h1 = max(16, min(n_features, 64))
-    h1 = ((h1 + 3) // 4) * 4
-    h2 = max(8, min(n_features // 2, 32))
-    h2 = ((h2 + 3) // 4) * 4
-    return [h0, h1, h2]
 
 
 def get_danet_param_mapper(params: dict, pipeline) -> dict:
     """Map symbolic param names to pipeline constructor kwargs.
 
     Translates "hidden_dims_choice" → actual "hidden_dims" list,
-    adds default values for gating_k, and preserves all other params.
+    and preserves all other params.  ``hidden_dims`` and ``gating_k``
+    are auto-computed by the pipeline when omitted, so ``adaptive``
+    simply passes nothing.
     """
-    n_feat = len(pipeline.numeric_features)
     pipe_kwargs = dict(params)  # copy
 
-    # Map hidden_dims_choice → hidden_dims
+    # Map hidden_dims_choice → hidden_dims (None = let pipeline auto-compute)
     choice = pipe_kwargs.pop("hidden_dims_choice", "adaptive")
-    if choice == "adaptive":
-        pipe_kwargs["hidden_dims"] = _compute_hidden_dims(n_feat)
-    elif choice == "narrow":
+    if choice == "narrow":
         pipe_kwargs["hidden_dims"] = [32, 16, 8]
     elif choice == "wide":
         pipe_kwargs["hidden_dims"] = [256, 128, 64]
+    # "adaptive": do nothing — pipeline auto-computes hidden_dims from n_features
 
     # Add required pipeline kwargs that aren't in the grid
     pipe_kwargs.setdefault("numeric_features", pipeline.numeric_features)
     pipe_kwargs.setdefault("categorical_features", pipeline.categorical_features)
     pipe_kwargs.setdefault("target_column", pipeline.target_column)
-    pipe_kwargs.setdefault("gating_k", max(1, n_feat // 3))
     pipe_kwargs.setdefault("batch_size", pipeline.batch_size)
     pipe_kwargs.setdefault("epochs", 100)
     pipe_kwargs.setdefault("lr_scheduler", "plateau")
     pipe_kwargs.setdefault("use_amp", True)
     pipe_kwargs.setdefault("early_stopping_patience", 15)
     pipe_kwargs.setdefault("random_state", pipeline.random_state)
-    pipe_kwargs.setdefault("n_classes", getattr(pipeline, "n_classes", None))
+    if hasattr(pipeline, "n_classes"):
+        pipe_kwargs.setdefault("n_classes", pipeline.n_classes)
 
     return pipe_kwargs
