@@ -58,6 +58,8 @@ class MulticlassClassificationPipeline(BaseNNPipeline):
             gating_dropout=self.gating_dropout,
             gating_init_bias=self.gating_init_bias,
             use_batch_norm=self.use_batch_norm,
+            interaction_type=self.interaction_type,
+            num_cross_layers=self.num_cross_layers,
         )
 
         # Output layer: logits for each class
@@ -120,13 +122,14 @@ class MulticlassClassificationPipeline(BaseNNPipeline):
         if self.class_weights is None:
             targets = np.asarray(df_train[self.target_column].values, dtype=np.int64)
             class_counts = np.bincount(targets, minlength=self.n_classes)
-            total = class_counts.sum()
-            weights = np.ones(self.n_classes, dtype=np.float64)
-            for c in range(self.n_classes):
-                if class_counts[c] > 0:
-                    weights[c] = float(total) / (self.n_classes * float(class_counts[c]))
-            # Cap to prevent any class from dominating
-            weights = np.clip(weights, 0.1, 10.0)
+            # Effective number of samples (Cui et al. 2019): naturally saturating
+            # weights without arbitrary caps.
+            beta = 1.0 - 1.0 / float(targets.size)
+            effective_num = (1.0 - np.power(beta, class_counts)) / (1.0 - beta)
+            weights = 1.0 / effective_num
+            # Normalize to mean=1 so learning rate stays stable
+            weights = weights / weights.mean()
+            weights = np.clip(weights, 0.1, 100.0)  # safety clamp, much wider than old 10.0
             self.class_weights = weights.tolist()
             from .utils.logger import setup_logger
             logger = setup_logger(__name__)

@@ -6,11 +6,13 @@ from .base import BaseNNPipeline
 from .binary import BinaryClassificationPipeline
 from .regression import RegressionPipeline
 from .multiclass import MulticlassClassificationPipeline
+from .augmentation.tabular import TabularAugmentation
 
 
 __all__ = [
     "BaseNNPipeline",
     "BinaryClassificationPipeline",
     "RegressionPipeline",
-    "MulticlassClassificationPipeline"
+    "MulticlassClassificationPipeline",
+    "TabularAugmentation",
 ]

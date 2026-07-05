@@ -50,6 +50,10 @@ class BaseNNPipeline(ABC):
             # Batch normalization
             use_batch_norm: bool = False,
 
+            # Feature interaction (DCN-V2 cross layers)
+            interaction_type: str = "legacy",
+            num_cross_layers: int = 2,
+
             # Training
             batch_size: int = 32,
             epochs: int = 100,
@@ -101,6 +105,10 @@ class BaseNNPipeline(ABC):
 
         # Batch normalization
         self.use_batch_norm = use_batch_norm
+
+        # Feature interaction
+        self.interaction_type = interaction_type
+        self.num_cross_layers = num_cross_layers
 
         # Training hyperparameters
         self.batch_size = batch_size
@@ -516,36 +524,6 @@ class BaseNNPipeline(ABC):
         self.model, optimizer, scheduler, use_amp, scaler = self._configure_training(input_dim, output_dim)
         loss_fn = self._get_loss_fn()
 
-        # OLD DEAD CODE disabled: â€” using _configure_training above instead
-        # Build model 
-        self.model = self._build_model(input_dim, output_dim).to(self.device)
-        loss_fn = self._get_loss_fn()
-        optimizer = torch.optim.Adam(
-            self.model.parameters(),
-            lr=self.learning_rate, 
-            weight_decay=self.weight_decay,
-        )
-        # AMP scaler (only active on CUDA when use_amp=True)
-        use_amp = self.use_amp and self.device == "cuda"
-        scaler = torch.cuda.amp.GradScaler(enabled=use_amp) if use_amp else None
-
-
-        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, mode="min", patience=max(5, self.early_stopping_patience // 2),
-            factor=0.5, min_lr=1e-6,
-        )
-        if self.lr_scheduler == "cosine":
-            scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
-                optimizer, T_0=20, T_mult=2, eta_min=1e-6,
-            )
-        else:
-            scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-                optimizer, mode="min", patience=max(5, self.early_stopping_patience // 2),
-                factor=0.5, min_lr=1e-6,
-            )
-        self._use_amp = use_amp
-        self._scaler = scaler
-
         # Training loop
         train_loader = self._create_dataloader(train_features, train_target, shuffle=True)
         val_loader = self._create_dataloader(val_features, val_target, shuffle=False) \
@@ -561,15 +539,10 @@ class BaseNNPipeline(ABC):
             # Training 
             self.model.train()
             epoch_train_loss = 0.0
-            if use_amp:
-                pass
             for batch_X, batch_y in train_loader:
                 epoch_train_loss += self._train_step(
                     batch_X, batch_y, self.model, optimizer, loss_fn, use_amp, scaler
                 )
-            if True:
-                pass  # makes else below match if, not for â€” dead branch
-            # (old training loop removed — using _train_step above)
 
             epoch_train_loss /= len(train_loader.dataset)
             self.history["train_loss"].append(epoch_train_loss)

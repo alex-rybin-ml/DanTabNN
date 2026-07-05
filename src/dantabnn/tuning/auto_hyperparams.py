@@ -50,10 +50,12 @@ def _param_count(hidden_dims, input_dim, output_dim):
 
 
 
-def scaling_law_hidden_dims(stats: Dict[str, float], task: str = "regression") -> List[int]:
+def scaling_law_hidden_dims(stats: Dict[str, float], task: str = "regression",
+                            n_classes: int = 2) -> List[int]:
     """Scaling laws for hidden dimensions based on dataset complexity.
     
     Principles: total params < n/10, deeper for larger n, wider for high PCA dim.
+    Multiclass tasks get wider (per-class capacity) and deeper (more boundaries).
     """
     n, d = stats["n_samples"], stats["n_features"]
     pca_dim = stats.get("pca_dim_95", d)
@@ -68,9 +70,17 @@ def scaling_law_hidden_dims(stats: Dict[str, float], task: str = "regression") -
     elif n < 3000: depth = 3
     elif n < 15000: depth = 3 if aspect < 0.02 else 4
     else: depth = 4
+    # Multiclass needs at least 3 layers for class-specific boundaries
+    if n_classes > 4:
+        depth = max(depth, 3)
     dims = []; w = max(int(base_width * width_mult * 8), int(pca_dim))
     for _ in range(depth): w = max(8, w); dims.append(w); w = w // 2
     dims = [((d2 + 3) // 4) * 4 for d2 in dims]
+    # Width floor: each class needs at least 4 neurons for its decision boundary
+    if n_classes > 4:
+        min_width = ((n_classes * 4 + 3) // 4) * 4
+        dims = [max(d2, min_width) for i, d2 in enumerate(dims)]
+        min_width = min_width // 2
     output_dim = 1 if task == "regression" else 2
     while _param_count(dims, int(d), output_dim) > max_params and len(dims) > 1: dims = dims[:-1]
     while _param_count(dims, int(d), output_dim) > max_params and dims[0] > 16: dims = [max(8, d3 // 2) for d3 in dims]
@@ -102,18 +112,20 @@ def generate_candidates(stats, task="regression"):
     return cand[:8]
 
 
-def auto_hyperparams(X: np.ndarray, y=None, task="regression", time_budget=10.0, device="cpu") -> Dict:
+def auto_hyperparams(X: np.ndarray, y=None, task="regression", time_budget=10.0, device="cpu",
+                     n_classes: int = 2) -> Dict:
     """Auto-select hyperparameters for tabular neural network training.
 
     Returns dict: hidden_dims, dropout, learning_rate, batch_size, augmentation dict,
-                  use_feature_engineering, warmup_epochs, loss_type
+                  use_feature_engineering, warmup_epochs, loss_type, gating_type,
+                  interaction_type
     """
     t0 = time.time(); stats = compute_dataset_complexity(X, y)
     n, d = int(stats["n_samples"]), int(stats["n_features"])
     pca_dim = stats.get("pca_dim_95", d)
 
     # Stage 1: Scaling laws
-    hidden_dims = scaling_law_hidden_dims(stats, task)
+    hidden_dims = scaling_law_hidden_dims(stats, task, n_classes)
     if pca_dim <= 2 and n < 5000: lr = 5e-4
     elif pca_dim <= 2: lr = 1e-3
     elif n < 500: lr = 5e-4
@@ -143,7 +155,7 @@ def auto_hyperparams(X: np.ndarray, y=None, task="regression", time_budget=10.0,
             for c in cand:
                 hd = c["hidden_dims"]
                 try:
-                    m = DANetModule(input_dim=d, hidden_dims=hd, output_dim=od, dropout=0.1,
+                    m = DANetModule(input_dim=d, hidden_dims=hd, dropout=0.1,
                                     attention_heads=min(4, hd[0]//2) if hd[0]>=4 else 2); m.to(device)
                     scores.append(zero_cost_score(m, Xb))
                 except: scores.append(-1.0)
@@ -151,6 +163,13 @@ def auto_hyperparams(X: np.ndarray, y=None, task="regression", time_budget=10.0,
             if scores[bi] > 0: hidden_dims = cand[bi]["hidden_dims"]
         except ImportError: pass
 
+    # Gating: enable for complex multiclass or high-dimensional data, not just PCA
+    use_gating = (n_classes > 4) or (d > 30) or (pca_dim > 2)
+    gating_type = "soft" if use_gating else "none"
+    # Cross layer: enable DCN-V2 feature interactions for complex multiclass
+    interaction_type = "cross" if (d > 30 and n_classes > 4) else "legacy"
     return {"hidden_dims": hidden_dims, "dropout": dropout, "learning_rate": lr,
             "batch_size": bs, "augmentation": aug, "use_feature_engineering": feat_eng,
-            "warmup_epochs": warmup, "loss_type": loss_type, "gating_type": "none" if pca_dim <= 2 else "soft", "dataset_stats": stats}
+            "warmup_epochs": warmup, "loss_type": loss_type,
+            "gating_type": gating_type, "interaction_type": interaction_type,
+            "dataset_stats": stats}

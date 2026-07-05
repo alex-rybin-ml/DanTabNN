@@ -45,6 +45,8 @@ class RegressionPipeline(BaseNNPipeline):
             gating_dropout=self.gating_dropout,
             gating_init_bias=self.gating_init_bias,
             use_batch_norm=self.use_batch_norm,
+            interaction_type=self.interaction_type,
+            num_cross_layers=self.num_cross_layers,
         )
 
         # Output layer: single continious value
