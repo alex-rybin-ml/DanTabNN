@@ -112,6 +112,7 @@ class DANetModule(nn.Module):
             gating_dropout: float = 0.0,
             gating_init_bias: float = 0.0,
             use_batch_norm: bool = False,
+            cross_first: bool = True,
     ):
         super().__init__()
         self.input_dim = input_dim
@@ -122,6 +123,7 @@ class DANetModule(nn.Module):
         self.low_rank = low_rank
         self.rank_ratio = rank_ratio
         self.gating_type = gating_type
+        self.cross_first = cross_first
 
         # Feature gating (differentiable feature selection)
         self.feature_gating = create_feature_gating(
@@ -133,6 +135,20 @@ class DANetModule(nn.Module):
             dropout=gating_dropout,
             init_bias=gating_init_bias,
         )
+
+        # Cross-first: DCN-V2 operates on raw features (before embedding)
+        if cross_first and interaction_type != 'legacy':
+            self.cross_raw = create_interaction_layer(
+                input_dim=input_dim,
+                interaction_type=interaction_type,
+                num_cross_layers=num_cross_layers,
+                low_rank=low_rank,
+                rank_ratio=rank_ratio,
+                dropout=dropout,
+            )
+            self.layer_norm_cross = nn.LayerNorm(input_dim)
+        else:
+            self.cross_raw = None
 
         # Embedding layer (optional, could be linear projection)
         self.embed = nn.Linear(input_dim, hidden_dims[0]) if hidden_dims else nn.Identity()
@@ -155,16 +171,19 @@ class DANetModule(nn.Module):
         else:
             self.sample_attention = None
 
-        # Interaction layer (sparse cross-date features)
+        # Interaction layer (after embedding, unless cross_first is active)
         interaction_input_dim = hidden_dims[0] if hidden_dims else input_dim
-        self.interaction = create_interaction_layer(
-            input_dim=interaction_input_dim,
-            interaction_type=interaction_type,
-            num_cross_layers=num_cross_layers,
-            low_rank=low_rank,
-            rank_ratio=rank_ratio,
-            dropout=dropout
-        )
+        if cross_first and interaction_type != 'legacy':
+            self.interaction = None  # moved to cross_raw before embed
+        else:
+            self.interaction = create_interaction_layer(
+                input_dim=interaction_input_dim,
+                interaction_type=interaction_type,
+                num_cross_layers=num_cross_layers,
+                low_rank=low_rank,
+                rank_ratio=rank_ratio,
+                dropout=dropout,
+            )
 
         # Batch norm (optional, helps convergence especially for regression)
         self.use_batch_norm = use_batch_norm
@@ -200,9 +219,6 @@ class DANetModule(nn.Module):
         """
         # Apply feature gating before embedding/attention
         if self.feature_gating is not None:
-            # The mask from the pipeline only covers numeric+generated features,
-            # but x includes missing indicators and categorical encoded features.
-            # Pad the mask with zeros (not missing) for the remaining features.
             gating_mask = mask
             if mask is not None and mask.shape[1] < x.shape[1]:
                 padding = torch.zeros(
@@ -211,6 +227,11 @@ class DANetModule(nn.Module):
                 )
                 gating_mask = torch.cat([mask, padding], dim=1)
             x, gate_mask = self.feature_gating(x, mask=gating_mask)
+
+        # Cross-first: DCN-V2 on raw features before embedding
+        if self.cross_raw is not None:
+            x = self.cross_raw(x)
+            x = self.layer_norm_cross(x)
 
         # Add sequence dimension for attention modules
         x = x.unsqueeze(1)  # (B, 1, 0)

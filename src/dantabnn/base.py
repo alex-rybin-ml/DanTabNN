@@ -531,9 +531,12 @@ class BaseNNPipeline(ABC):
 
         self.history = {"train_loss": [], "val_loss": []}
         best_val_loss = float("inf")
+        best_val_metric = float("-inf")
+        best_metric_state = None
         patience_counter = 0
         min_delta = 1e-4
         min_epochs = max(10, self.early_stopping_patience)
+        self.best_epoch = 0
 
         for epoch in range(self.epochs):
             # Training 
@@ -565,52 +568,56 @@ class BaseNNPipeline(ABC):
                 else:
                     scheduler.step(epoch_val_loss)
                 self.history["val_loss"].append(epoch_val_loss)
-                if False:
-                    pass  # dead â€” scheduler already stepped above
                 scheduler.step(epoch_val_loss)
             else:
                 epoch_val_loss = None
-                # (cosine scheduler already stepped)
 
-            # Early stopping â€” requires minimum epochs + meaningful improvement
-            if val_loader is not None and epoch >= min_epochs:
+            # Track loss-based best state (fallback when task metric is constant)
+            if val_loader is not None and epoch_val_loss is not None:
                 if epoch_val_loss < best_val_loss - min_delta:
                     best_val_loss = epoch_val_loss
-                    patience_counter = 0
-                    self.best_epoch = epoch
-                    self.best_state = self.model.state_dict()
+                    self.best_state = {k: v.clone() for k, v in self.model.state_dict().items()}
                 elif epoch_val_loss < best_val_loss:
-                    # Marginal improvement (< min_delta) â€” update best but also count patience
                     best_val_loss = epoch_val_loss
-                    self.best_state = self.model.state_dict()
-                    patience_counter += 1
-                    if patience_counter > self.early_stopping_patience:
-                        logger.info(f"Early stopping triggered at epoch {epoch}")
-                        break
+                    self.best_state = {k: v.clone() for k, v in self.model.state_dict().items()}
+
+            # Task metric computation & early stopping
+            metric_val = None
+            if val_loader is not None and epoch_val_loss is not None:
+                val_preds_cat = torch.cat(all_val_preds, dim=0)
+                val_targets_cat = torch.cat(all_val_targets, dim=0)
+                metric_val = self._compute_val_metric(val_targets_cat, val_preds_cat)
+                if metric_val > best_val_metric:
+                    best_val_metric = metric_val
+                    self.best_epoch = epoch
+                    best_metric_state = {k: v.clone() for k, v in self.model.state_dict().items()}
+                    patience_counter = 0
                 else:
                     patience_counter += 1
-                    if patience_counter > self.early_stopping_patience:
-                        logger.info(f"Early stopping triggered at epoch {epoch}")
-                        break
 
-            else:
-                self.best_state = self.model.state_dict()
+            # Early stopping — requires minimum epochs + patience on task metric
+            if val_loader is not None and epoch >= min_epochs:
+                if patience_counter > self.early_stopping_patience:
+                    logger.info(
+                        f"Early stopping triggered at epoch {epoch} "
+                        f"(best val_{self._val_metric_name()}={best_val_metric:.4f})"
+                    )
+                    break
+            elif val_loader is None:
+                self.best_state = {k: v.clone() for k, v in self.model.state_dict().items()}
             
             if verbose >= 1 and epoch % 3 == 0:
                 msg = f"Epoch {epoch:3d}: train_loss={epoch_train_loss:.4f}"
                 if epoch_val_loss is not None:
                     msg += f", val_loss={epoch_val_loss:.4f}"
-                # Compute per-epoch task metric (e.g. R², ROC-AUC, F1)
-                if val_loader is not None and epoch_val_loss is not None:
-                    metric_name = self._val_metric_name()
-                    val_preds_cat = torch.cat(all_val_preds, dim=0)
-                    val_targets_cat = torch.cat(all_val_targets, dim=0)
-                    metric_val = self._compute_val_metric(val_targets_cat, val_preds_cat)
-                    msg += f", val_{metric_name}={metric_val:.4f}"
+                if metric_val is not None:
+                    msg += f", val_{self._val_metric_name()}={metric_val:.4f}"
                 logger.info(msg)
 
-        # Restore best model
-        if hasattr(self, "best_state"):
+        # Restore best model by task metric (or loss fallback if metric never improved)
+        if best_metric_state is not None:
+            self.model.load_state_dict(best_metric_state)
+        elif self.best_state is not None:
             self.model.load_state_dict(self.best_state)
         self.is_fitted = True
         logger.info("Fitting completed.")
@@ -1112,22 +1119,24 @@ class BaseNNPipeline(ABC):
     def get_feature_importance(self, method: str = "attention") -> pd.DataFrame:
         """Compute feature importance scores.
         
-        Parameters
-        ----------
-        method : str 
-            Method to compute importance ('attention', 'gradient', 'permutation').
-        
-        Returns
-        -------
-        pd.DataFrame
-            DataFrame with feature names and importance scores.
+        Uses learned gating logits when available (soft/topk gating),
+        falls back to uniform weights if no gating module exists.
         """
         if not self.is_fitted:
             raise RuntimeError("Pipline not fitted. Call fit first.")
         
-        # Placeholder implementation - should be overridden by subclasses
-        # or implemented in a separated module.
-        importance = np.ones(len(self.feature_names)) if self.feature_names else np.array([])
+        if self.feature_names is None or len(self.feature_names) == 0:
+            return pd.DataFrame(columns=["feature", "importance"])
+        
+        # Extract gating importance from DANetModule
+        importance = np.ones(len(self.feature_names))
+        if self.model is not None and hasattr(self.model, 'feature_gating') and self.model.feature_gating is not None:
+            gating = self.model.feature_gating
+            if hasattr(gating, 'gate_logits'):
+                probs = torch.sigmoid(gating.gate_logits).detach().cpu().numpy()
+                if len(probs) == len(self.feature_names):
+                    importance = probs
+        
         return pd.DataFrame(
             {"feature": self.feature_names, "importance": importance}
         ).sort_values("importance", ascending=False)

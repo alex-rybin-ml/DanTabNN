@@ -69,12 +69,16 @@ class MulticlassClassificationPipeline(BaseNNPipeline):
         return model
 
     def _get_loss_fn(self) -> nn.Module:
-        """Cross-entropy loss with class weights and label smoothing.
-
-        Label smoothing (0.1) prevents overconfidence on majority classes
-        and improves generalization on imbalanced multiclass tasks.
+        """Multiclass loss function.
+        
+        Uses focal loss for imbalanced datasets (class_weights with
+        max/min ratio > 3.0), weighted cross-entropy otherwise.
         """
         if self.class_weights is not None:
+            w = np.asarray(self.class_weights, dtype=np.float64)
+            if w.max() / max(w.min(), 1e-8) > 3.0:
+                from .utils.losses import MultiClassFocalLoss
+                return MultiClassFocalLoss(gamma=2.0)
             weights = torch.tensor(self.class_weights, dtype=torch.float32).to(self.device)
             return nn.CrossEntropyLoss(weight=weights)
         return nn.CrossEntropyLoss()

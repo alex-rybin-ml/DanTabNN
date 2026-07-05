@@ -42,27 +42,36 @@ def compute_dataset_complexity(X_in: np.ndarray, y: Optional[np.ndarray] = None)
     return stats
 
 
-def _param_count(hidden_dims, input_dim, output_dim):
-    total = 0; prev = input_dim
-    for h in hidden_dims: total += prev * h + h; prev = h
-    total += prev * output_dim + output_dim
-    return total * 5  # ~5x for attention + cross + embedding + gating overhead
-
+def _param_count(hidden_dims, input_dim, output_dim, interaction_type='legacy',
+                 num_cross_layers=2):
+    """Honest parameter count including cross-layer and attention overhead."""
+    if not hidden_dims:
+        return input_dim * output_dim
+    embed = input_dim * hidden_dims[0]
+    ffn = sum(hidden_dims[i] * hidden_dims[i+1] for i in range(len(hidden_dims)-1)) if len(hidden_dims) > 1 else 0
+    outp = hidden_dims[-1] * output_dim
+    cross = num_cross_layers * hidden_dims[0] * hidden_dims[0] if interaction_type != 'legacy' else 0
+    attn = hidden_dims[0] * hidden_dims[0]
+    gating = input_dim
+    total = embed + ffn + outp + cross + attn + gating
+    return total
 
 
 def scaling_law_hidden_dims(stats: Dict[str, float], task: str = "regression",
                             n_classes: int = 2) -> List[int]:
     """Scaling laws for hidden dimensions based on dataset complexity.
     
-    Principles: total params < n/10, deeper for larger n, wider for high PCA dim.
-    Multiclass tasks get wider (per-class capacity) and deeper (more boundaries).
+    Uses sqrt(n) scaling to actually utilize large datasets, with
+    honest parameter counting including cross-layer and attention overhead.
     """
     n, d = stats["n_samples"], stats["n_features"]
     pca_dim = stats.get("pca_dim_95", d)
     aspect = stats.get("aspect_ratio", 0.1)
-    base_width = int(4 * np.log1p(n) / np.log1p(500))
+    # Wider scaling: sqrt(n) gives architectures that actually use available data
+    base_width = max(32, int(np.sqrt(n) / 10))
+    base_width = min(512, base_width)
     width_mult = min(2.0, max(0.5, pca_dim / max(d, 1.0)))
-    max_params = int(n * 5)
+    max_params = int(n * min(20, max(5, n // 10000)))
     if pca_dim <= 2 and n > 20000: depth = 3
     elif pca_dim <= 2: depth = 2
     elif n < 300: depth = 2
@@ -70,13 +79,11 @@ def scaling_law_hidden_dims(stats: Dict[str, float], task: str = "regression",
     elif n < 3000: depth = 3
     elif n < 15000: depth = 3 if aspect < 0.02 else 4
     else: depth = 4
-    # Multiclass needs at least 3 layers for class-specific boundaries
     if n_classes > 4:
         depth = max(depth, 3)
     dims = []; w = max(int(base_width * width_mult * 8), int(pca_dim))
     for _ in range(depth): w = max(8, w); dims.append(w); w = w // 2
     dims = [((d2 + 3) // 4) * 4 for d2 in dims]
-    # Width floor: each class needs at least 4 neurons for its decision boundary
     if n_classes > 4:
         min_width = ((n_classes * 4 + 3) // 4) * 4
         dims = [max(d2, min_width) for i, d2 in enumerate(dims)]
@@ -150,7 +157,6 @@ def auto_hyperparams(X: np.ndarray, y=None, task="regression", time_budget=10.0,
             from dantabnn.models.danet import DANetModule
             cand = generate_candidates(stats, task)
             Xb = torch.FloatTensor(X[:min(256, n)]).to(device)
-            od = 1 if task == "regression" else (2 if task == "binary" else (int(y.max()+1) if y is not None else 2))
             scores = []
             for c in cand:
                 hd = c["hidden_dims"]

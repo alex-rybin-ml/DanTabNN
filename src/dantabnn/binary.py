@@ -64,20 +64,14 @@ class BinaryClassificationPipeline(BaseNNPipeline):
         return model
     
     def _get_loss_fn(self) -> nn.Module:
-        """Binary cross-entropy loss with optional class weighting.
-
-        pos_weight > 3.0 causes BCE gradient explosion on CPU due to
-        unbounded attention logits multiplied by large class weight.
-        Cap at 3.0 to ensure stability across all imbalance ratios.
+        """Binary loss function.
+        
+        Uses focal loss for imbalanced datasets (pos_weight > 1.0),
+        standard BCEWithLogitsLoss otherwise.
         """
-        if self.pos_weight is not None:
-            capped = min(float(self.pos_weight), 3.0)
-            if capped < self.pos_weight:
-                from .utils.logger import setup_logger
-                _lgr = setup_logger(__name__)
-                _lgr.warning(f"Capping pos_weight {self.pos_weight:.1f} → {capped:.1f} to prevent BCE explosion")
-            weight = torch.tensor([capped], device=self.device)
-            return nn.BCEWithLogitsLoss(pos_weight=weight)
+        if self.pos_weight is not None and self.pos_weight > 1.0:
+            from .utils.losses import FocalLoss
+            return FocalLoss(alpha=0.25, gamma=2.0)
         return nn.BCEWithLogitsLoss()
     
     def _get_metrics(self) -> Dict[str, Callable]:
