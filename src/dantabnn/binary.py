@@ -30,6 +30,8 @@ class BinaryClassificationPipeline(BaseNNPipeline):
         self.threshold_tuning = threshold_tuning
         self._optimal_threshold: float = 0.5
         super().__init__(*args, **kwargs)
+        self._task_type = 'binary'
+        self._n_classes = 2
 
     def _build_model(self, input_dim: int, output_dim: int):
         """Build a Danet module with a single-output linear layer."""

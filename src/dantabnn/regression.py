@@ -27,6 +27,8 @@ class RegressionPipeline(BaseNNPipeline):
         self._target_mean: Optional[torch.Tensor] = None
         self._target_std: Optional[torch.Tensor] = None
         super().__init__(*args, **kwargs)
+        self._task_type = 'regression'
+        self._n_classes = 2
 
     def _build_model(self, input_dim: int, output_dim: int) -> nn.Module:
         """Build a DANet module with a single-output linear layer."""

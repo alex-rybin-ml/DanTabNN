@@ -20,13 +20,16 @@ def compute_dataset_complexity(X_in: np.ndarray, y: Optional[np.ndarray] = None)
     col_var = [np.var(X[:, i][finite_mask[:, i]]) if finite_mask[:, i].sum() > 1 else 0.0 for i in range(d)]
     stats["mean_variance"] = float(np.mean(col_var)) if col_var else 0.0
     stats["max_variance"] = float(np.max(col_var)) if col_var else 0.0
-    col_skew = []
-    for i in range(d):
-        col = X[:, i][finite_mask[:, i]]
-        if len(col) > 2:
-            std = col.std()
-            if std > 1e-10: col_skew.append(min(abs(float(np.mean((col - col.mean()) ** 3) / (std ** 3))), 10.0))
-    stats["mean_skewness"] = float(np.mean(col_skew)) if col_skew else 0.0
+    if n * d > 50_000_000:
+        stats["mean_skewness"] = 0.0  # skip: O(n*d) Python loop dominates PCA on large data
+    else:
+        col_skew = []
+        for i in range(d):
+            col = X[:, i][finite_mask[:, i]]
+            if len(col) > 2:
+                std = col.std()
+                if std > 1e-10: col_skew.append(min(abs(float(np.mean((col - col.mean()) ** 3) / (std ** 3))), 10.0))
+        stats["mean_skewness"] = float(np.mean(col_skew)) if col_skew else 0.0
     if n > d and d > 1:
         try:
             Xc = np.nan_to_num(X - X.mean(axis=0), 0.0)
@@ -90,7 +93,9 @@ def scaling_law_hidden_dims(stats: Dict[str, float], task: str = "regression",
         min_width = min_width // 2
     output_dim = 1 if task == "regression" else 2
     while _param_count(dims, int(d), output_dim) > max_params and len(dims) > 1: dims = dims[:-1]
-    while _param_count(dims, int(d), output_dim) > max_params and dims[0] > 16: dims = [max(8, d3 // 2) for d3 in dims]
+    while _param_count(dims, int(d), output_dim) > max_params and dims[0] > 16:
+        dims = [max(8, d3 // 2) for d3 in dims]
+        dims = [((d2 + 3) // 4) * 4 for d2 in dims]
     return dims
 
 

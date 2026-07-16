@@ -72,6 +72,13 @@ class BaseNNPipeline(ABC):
             engineer_max_features: int = 100,
             preprocessing_mode: str = "auto",  # "auto", "full", "minimal"
 
+            # Temporal features (v0.3.4)
+            temporal_windows: Optional[Tuple[int, ...]] = None,
+            temporal_date_column: Optional[str] = None,
+            temporal_groupby: Optional[List[str]] = None,
+            temporal_cv: bool = False,
+            cyclical_time: bool = False,
+
             # Device
             device: Optional[str] = None,
 
@@ -84,8 +91,13 @@ class BaseNNPipeline(ABC):
         self.categorical_features = categorical_features
         self.target_column = target_column
 
-        # Architecture
-        self.hidden_dims = hidden_dims
+        # Architecture: None=auto (uses _default_hidden_dims at init,
+        # overwritten by scaling law in fit() if user didn't specify)
+        self._hidden_dims_user = hidden_dims
+        if hidden_dims is None:
+            self.hidden_dims = self._default_hidden_dims()
+        else:
+            self.hidden_dims = hidden_dims
         self.dropout = dropout
         self.attention_heads = attention_heads
 
@@ -93,9 +105,6 @@ class BaseNNPipeline(ABC):
         self.gating_type = gating_type
         self.gating_k = gating_k
 
-        # Auto-compute architecture defaults from n_features when not provided
-        if self.hidden_dims is None:
-            self.hidden_dims = self._default_hidden_dims()
         if self.gating_k is None:
             self.gating_k = self._default_gating_k()
         self.gating_temperature = gating_temperature
@@ -128,6 +137,14 @@ class BaseNNPipeline(ABC):
         self.engineer_max_features = engineer_max_features
         self.preprocessing_mode = preprocessing_mode
         self._minimal_mode_applied = False
+
+        # Temporal features (v0.3.4)
+        self.temporal_windows = temporal_windows
+        self.temporal_date_column = temporal_date_column
+        self.temporal_groupby = temporal_groupby
+        self.temporal_cv = temporal_cv
+        self.cyclical_time = cyclical_time
+        self._temporal_gen: Any = None  # fitted TemporalAggregationGenerator
 
         # Device
         if device is None:
@@ -279,12 +296,36 @@ class BaseNNPipeline(ABC):
         List[str]
             Names of the features after preprocessing.
         """
+        # --- Temporal features (v0.3.4): DataFrame-level, before numpy extraction ---
+        if self.temporal_windows is not None:
+            from dantabnn.feature_generation.temporal import TemporalAggregationGenerator
+            if self._temporal_gen is None:
+                self._temporal_gen = TemporalAggregationGenerator(
+                    date_column=self.temporal_date_column or '',
+                    groupby_columns=self.temporal_groupby or [],
+                    windows=self.temporal_windows,
+                    aggregations=('mean', 'std', 'min', 'max'),
+                )
+            temp_features = self._temporal_gen.fit_transform(df) if fit else self._temporal_gen.transform(df)
+            if temp_features is not None and len(temp_features.columns) > 0:
+                df = pd.concat([df, temp_features], axis=1)
+
+        # Cyclical time encoding (v0.3.4)
+        if self.cyclical_time:
+            from dantabnn.preprocessing.temporal import add_cyclical_time
+            df = add_cyclical_time(df,
+                datetime_col=self.temporal_date_column,
+            )
+
         # Use to_numpy with float conversion that handles pandas NAType
+        # Save n_samples before potentially freeing df
+        n_samples = len(df)
+
         if self.numeric_features:
-            numeric_data = df[self.numeric_features].to_numpy(dtype=np.float64, na_value=np.nan, copy=False) 
+            numeric_data = df[self.numeric_features].to_numpy(dtype=np.float32, na_value=np.nan, copy=False) 
         else:
-            numeric_data = np.empty((len(df), 0))
-        categorical_data = df[self.categorical_features].values if self.categorical_features else np.empty((len(df), 0))
+            numeric_data = np.empty((n_samples, 0), dtype=np.float32)
+        categorical_data = df[self.categorical_features].values if self.categorical_features else np.empty((n_samples, 0))
 
         # Step 0: Impute missing values
         if self.impute_missing and numeric_data.size > 0:
@@ -352,7 +393,7 @@ class BaseNNPipeline(ABC):
         # Step 5: Combine features (handle sparse categorical encoding)
         cat_dense = categorical_encoded.toarray() if issparse(categorical_encoded) else categorical_encoded
         features = np.hstack([numeric_scaled, cat_dense]) if (
-                numeric_scaled.size > 0 or cat_dense.size > 0) else np.empty((len(df), 0))
+                numeric_scaled.size > 0 or cat_dense.size > 0) else np.empty((n_samples, 0))
 
         # Build feature names (before memory cleanup â€” needs numeric_scaled.shape)
         if self.engineer_features and self.feature_engineer is not None:
@@ -498,6 +539,23 @@ class BaseNNPipeline(ABC):
         input_dim = train_features.shape[1]
         output_dim = self._get_output_dim(train_target)
         logger.debug(f"Input dim: {input_dim}, output dim: {output_dim}")
+
+        # Resolve hidden_dims via scaling law if not user-specified
+        if self._hidden_dims_user is None:
+            try:
+                from dantabnn.tuning.auto_hyperparams import compute_dataset_complexity, scaling_law_hidden_dims
+                X_np = train_features.cpu().numpy()
+                stats = compute_dataset_complexity(X_np)
+                task = getattr(self, '_task_type', 'regression')
+                n_classes = getattr(self, '_n_classes', len(torch.unique(train_target.long())))
+                self.hidden_dims = scaling_law_hidden_dims(stats, task=task, n_classes=n_classes)
+                logger.info(
+                    f"Auto-generated hidden_dims={self.hidden_dims} from scaling law "
+                    f"(n={int(stats['n_samples'])}, d={int(stats['n_features'])})"
+                )
+            except Exception:
+                self.hidden_dims = self._default_hidden_dims()
+                logger.warning("Scaling law failed, using _default_hidden_dims()")
 
         # Validate input dimension â€” warn on large feature sets to prevent OOM
         if input_dim > 1024:
@@ -757,6 +815,23 @@ class BaseNNPipeline(ABC):
         output_dim = self._get_output_dim(train_target)
         logger.debug(f"Input dim: {input_dim}, output dim: {output_dim}")
 
+        # Resolve hidden_dims via scaling law if not user-specified
+        if self._hidden_dims_user is None:
+            try:
+                from dantabnn.tuning.auto_hyperparams import compute_dataset_complexity, scaling_law_hidden_dims
+                X_np = train_features.cpu().numpy()
+                stats = compute_dataset_complexity(X_np)
+                task = getattr(self, '_task_type', 'regression')
+                n_classes = getattr(self, '_n_classes', len(torch.unique(train_target.long())))
+                self.hidden_dims = scaling_law_hidden_dims(stats, task=task, n_classes=n_classes)
+                logger.info(
+                    f"Auto-generated hidden_dims={self.hidden_dims} from scaling law "
+                    f"(n={int(stats['n_samples'])}, d={int(stats['n_features'])})"
+                )
+            except Exception:
+                self.hidden_dims = self._default_hidden_dims()
+                logger.warning("Scaling law failed, using _default_hidden_dims()")
+
         if input_dim > 1024:
             logger.error(
                 f"Input dimension {input_dim} is very large. "
@@ -921,7 +996,7 @@ class BaseNNPipeline(ABC):
             df_train: pd.DataFrame,
             param_grid: Optional[Dict[str, List[Any]]] = None,
             df_val: Optional[pd.DataFrame] = None,
-            cv: Union[int, BaseCrossValidator] = 5,
+            cv: Union[int, BaseCrossValidator, None] = None,
             n_iter: Optional[int] = 500,
             scoring: str = "neg_mean_squared_error",
             direction: str = "minimize",
@@ -947,8 +1022,9 @@ class BaseNNPipeline(ABC):
         df_val : pd.DataFrame, optional
             Validation data for hold-out evaluation. If provided, ``cv``
             is ignored.
-        cv : int or BaseCrossValidator, default=5
+        cv : int, BaseCrossValidator, or None, default=None
             Cross-validation strategy when ``df_val`` is None.
+            If None, auto-selects 5-fold for n < 100K, single split otherwise.
         n_iter : int, optional
             Number of Optuna trials. Default is 50.
         scoring : str, default="neg_mean_squared_error"
@@ -999,6 +1075,27 @@ class BaseNNPipeline(ABC):
         # Use instance random_state if none provided
         if random_state is None:
             random_state = self.random_state
+
+        # Auto-adapt CV: temporal or standard
+        if cv is None:
+            n_samples = len(df_train)
+            if self.temporal_cv:
+                from sklearn.model_selection import TimeSeriesSplit
+                n_splits = 3 if n_samples > 100_000 else 5
+                cv = TimeSeriesSplit(n_splits=n_splits)
+                if verbose >= 1:
+                    logger.info(f"Temporal CV: TimeSeriesSplit(n_splits={n_splits})")
+                if self.temporal_date_column and self.temporal_date_column in df_train.columns:
+                    if not df_train[self.temporal_date_column].is_monotonic_increasing:
+                        warnings.warn(
+                            f"Data is not sorted by '{self.temporal_date_column}'. "
+                            "TimeSeriesSplit may produce meaningless splits. "
+                            "Sort your data before calling fit()."
+                        )
+            else:
+                cv = 5 if n_samples < 100_000 else 1
+                if verbose >= 1:
+                    logger.info(f"Auto-selected cv={cv} (n={n_samples})")
 
         tuner = HyperparameterTuner(
             pipeline=self,

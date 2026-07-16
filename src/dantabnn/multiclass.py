@@ -40,6 +40,8 @@ class MulticlassClassificationPipeline(BaseNNPipeline):
             target_column=target_column,
             **kwargs,
         )
+        self._task_type = 'multiclass'
+        self._n_classes = n_classes
 
     def _build_model(self, input_dim: int, output_dim: int) -> nn.Module:
         """Build a DANet module with a multi-output linear layer."""
